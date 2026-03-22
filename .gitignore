@@ -11,3 +11,5 @@ dist/
 debug_video/
 *.mp4
 *.pkl
+exp/
+logs/
