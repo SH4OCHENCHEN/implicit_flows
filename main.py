@@ -1,7 +1,10 @@
 import os
 os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.2'
+import atexit
 import json
 import random
+import shutil
+import tempfile
 import time
 
 import jax
@@ -20,9 +23,14 @@ from utils.log_utils import CsvLogger, get_exp_name, get_flag_dict, get_wandb_vi
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_integer('enable_wandb', 1, 'Whether to use wandb.')
+flags.DEFINE_integer('enable_wandb', 0, 'Whether to use wandb.')
 flags.DEFINE_string('wandb_run_group', 'ValueFlows', 'Run group.')
-flags.DEFINE_string('wandb_mode', 'offline', 'Wandb mode.')
+flags.DEFINE_string('wandb_mode', 'disabled', 'Wandb mode.')
+flags.DEFINE_integer(
+    'wandb_no_local_files',
+    1,
+    'Whether to avoid persisting wandb files under the experiment directory.',
+)
 flags.DEFINE_integer('seed', 0, 'Random seed.')
 flags.DEFINE_string('env_name', 'antmaze-large-navigate-v0', 'Environment (dataset) name.')
 flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
@@ -52,9 +60,17 @@ def main(_):
     exp_name = get_exp_name(FLAGS.seed)
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, FLAGS.wandb_run_group, exp_name)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
-    if FLAGS.enable_wandb:
+    if FLAGS.enable_wandb and FLAGS.wandb_mode != 'disabled':
+        wandb_output_dir = FLAGS.save_dir
+        if FLAGS.wandb_no_local_files:
+            wandb_output_dir = tempfile.mkdtemp(prefix='wandb_tmp_')
+
+            def _cleanup_wandb_tmp_dir(tmp_dir=wandb_output_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            atexit.register(_cleanup_wandb_tmp_dir)
         setup_wandb(
-            wandb_output_dir=FLAGS.save_dir,
+            wandb_output_dir=wandb_output_dir,
             project='value-flows', group=FLAGS.wandb_run_group, name=exp_name,
             mode=FLAGS.wandb_mode
         )
@@ -227,6 +243,8 @@ def main(_):
 
     train_logger.close()
     eval_logger.close()
+    if FLAGS.enable_wandb and FLAGS.wandb_mode != 'disabled':
+        wandb.finish()
 
 
 if __name__ == '__main__':
