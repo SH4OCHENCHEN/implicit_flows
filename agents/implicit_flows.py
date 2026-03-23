@@ -110,8 +110,8 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
             mixed_next_vector_field = soft_next_vector_field
 
         target_vector_field = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field + r_vector_field
-        bcfm_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
-        critic_loss = bcfm_loss.mean()
+        bcfm_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean()
+        critic_loss = bcfm_loss
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
         q1 = (
