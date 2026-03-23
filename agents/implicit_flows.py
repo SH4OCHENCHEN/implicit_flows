@@ -9,11 +9,14 @@ import optax
 
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import ActorVectorField, ValueVectorField
+from utils.networks import ValueVectorField, ActorVectorField
 
 
 class ImplicitFlowsAgent(flax.struct.PyTreeNode):
-    """Implicit Flows agent (non-goal-conditioned)."""
+    """Implicit Flows agent.
+
+    This is aligned with Value Flows structure, while keeping the implicit critic loss.
+    """
 
     rng: Any
     network: Any
@@ -37,11 +40,12 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         return local_std, relative_std, conservative_beta
 
     def critic_loss(self, batch, grad_params, rng):
-        """Compute critic loss with flow matching and path-wise aggregation."""
+        """Compute implicit critic loss (kept from implicit flows)."""
         batch_size = batch['actions'].shape[0]
         rng, actor_rng, noise_rng, time_rng, q_rng, ret_rng = jax.random.split(rng, 6)
 
-        next_actions = self.sample_actions(batch['next_observations'], seed=actor_rng)
+        # Keep Value Flows style action extraction for the next action.
+        next_actions = self.sample_actions(batch['next_observations'], actor_rng)
 
         times = jax.random.uniform(time_rng, (batch_size, 1))
         next_noises = jax.random.normal(noise_rng, (batch_size, 1))
@@ -63,26 +67,39 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         )
         ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
         ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
+
         alpha1 = ret_stds2 / (ret_stds1 + ret_stds2 + 1e-8)
         alpha2 = ret_stds1 / (ret_stds1 + ret_stds2 + 1e-8)
-        soft_next_returns = alpha1 * noisy_next_returns1 + alpha2 * noisy_next_returns2
-        hard_next_returns = jnp.minimum(noisy_next_returns1, noisy_next_returns2)
 
-        conservative_beta = jnp.zeros_like(soft_next_returns)
-        if self.config['ret_agg'] == 'min':
-            noisy_next_returns = hard_next_returns
-        elif self.config['ret_agg'] == 'mean':
-            noisy_next_returns = (noisy_next_returns1 + noisy_next_returns2) / 2
-        elif self.config['ret_agg'] == 'adaptive_addq':
+        conservative_beta = jnp.zeros_like(alpha1)
+        if self.config['ret_agg'] == 'adaptive_addq':
             _, _, conservative_beta = self.compute_addq_path_beta(ret_stds1, ret_stds2)
-            noisy_next_returns = (1.0 - conservative_beta) * soft_next_returns + conservative_beta * hard_next_returns
+
+        soft_next_returns_from_noises = (
+            alpha1 * noisy_next_returns1 + alpha2 * noisy_next_returns2
+        )
+        hard_next_returns_from_noises = jnp.minimum(
+            noisy_next_returns1, noisy_next_returns2
+        )
+
+        if self.config['ret_agg'] == 'min':
+            noisy_next_returns_bellman = hard_next_returns_from_noises
+        elif self.config['ret_agg'] == 'mean':
+            noisy_next_returns_bellman = (
+                noisy_next_returns1 + noisy_next_returns2
+            ) / 2
+        elif self.config['ret_agg'] == 'adaptive_addq':
+            noisy_next_returns_bellman = (
+                (1.0 - conservative_beta) * soft_next_returns_from_noises
+                + conservative_beta * hard_next_returns_from_noises
+            )
         else:
-            noisy_next_returns = soft_next_returns
+            noisy_next_returns_bellman = soft_next_returns_from_noises
 
         noises = jax.random.normal(ret_rng, (batch_size, 1))
         r_noises = noises - self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_noises
         rt = times * jnp.expand_dims(batch['rewards'], axis=-1) + (1 - times) * r_noises
-        noisy_returns = rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * noisy_next_returns
+        noisy_returns = rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * noisy_next_returns_bellman
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
 
         vector_field1 = self.network.select('critic_flow1')(
@@ -92,10 +109,10 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
             noisy_returns, times, batch['observations'], batch['actions'], params=grad_params
         )
         next_vector_field1 = self.network.select('target_critic_flow1')(
-            noisy_next_returns, times, batch['next_observations'], next_actions
+            noisy_next_returns_bellman, times, batch['next_observations'], next_actions
         )
         next_vector_field2 = self.network.select('target_critic_flow2')(
-            noisy_next_returns, times, batch['next_observations'], next_actions
+            noisy_next_returns_bellman, times, batch['next_observations'], next_actions
         )
 
         soft_next_vector_field = alpha1 * next_vector_field1 + alpha2 * next_vector_field2
@@ -105,34 +122,22 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         elif self.config['ret_agg'] == 'mean':
             mixed_next_vector_field = (next_vector_field1 + next_vector_field2) / 2
         elif self.config['ret_agg'] == 'adaptive_addq':
-            mixed_next_vector_field = (1.0 - conservative_beta) * soft_next_vector_field + conservative_beta * hard_next_vector_field
+            mixed_next_vector_field = (
+                (1.0 - conservative_beta) * soft_next_vector_field
+                + conservative_beta * hard_next_vector_field
+            )
         else:
             mixed_next_vector_field = soft_next_vector_field
 
         target_vector_field = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field + r_vector_field
-        bcfm_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean()
-        critic_loss = bcfm_loss
+        implicit_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
+        critic_loss = implicit_loss.mean()
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
-        q1 = (
-            q_noises
-            + self.network.select('critic_flow1')(
-                q_noises,
-                jnp.zeros_like(q_noises),
-                batch['observations'],
-                batch['actions'],
-            )
-        ).squeeze(-1)
-        q2 = (
-            q_noises
-            + self.network.select('critic_flow2')(
-                q_noises,
-                jnp.zeros_like(q_noises),
-                batch['observations'],
-                batch['actions'],
-            )
-        ).squeeze(-1)
-
+        q1 = (q_noises + self.network.select('critic_flow1')(
+            q_noises, jnp.zeros_like(q_noises), batch['observations'], batch['actions'])).squeeze(-1)
+        q2 = (q_noises + self.network.select('critic_flow2')(
+            q_noises, jnp.zeros_like(q_noises), batch['observations'], batch['actions'])).squeeze(-1)
         if self.config['clip_flow_returns']:
             q1 = jnp.clip(
                 q1,
@@ -144,7 +149,6 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
                 self.config['min_reward'] / (1 - self.config['discount']),
                 self.config['max_reward'] / (1 - self.config['discount']),
             )
-
         if self.config['q_agg'] == 'min':
             q = jnp.minimum(q1, q2)
         else:
@@ -152,22 +156,18 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
 
         return critic_loss, {
             'critic_loss': critic_loss,
-            'bcfm_loss': bcfm_loss,
+            'implicit_loss': implicit_loss,
             'q_mean': q.mean(),
             'q_max': q.max(),
             'q_min': q.min(),
-            'path_conservative_beta_mean': conservative_beta.mean(),
-            'path_conservative_beta_min': conservative_beta.min(),
-            'path_conservative_beta_max': conservative_beta.max(),
-            'path_soft_next_return_mean': soft_next_returns.mean(),
-            'path_hard_next_return_mean': hard_next_returns.mean(),
         }
 
     def actor_loss(self, batch, grad_params, rng):
-        """Compute actor loss."""
+        """Compute the BC flow actor loss (same as Value Flows)."""
         batch_size, action_dim = batch['actions'].shape
-        rng, x_rng, t_rng = jax.random.split(rng, 3)
+        rng, x_rng, t_rng, actor_rng, q_rng = jax.random.split(rng, 5)
 
+        # BC flow loss.
         x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
         x_1 = batch['actions']
         t = jax.random.uniform(t_rng, (batch_size, 1))
@@ -177,34 +177,18 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         pred = self.network.select('actor_flow')(batch['observations'], x_t, t, params=grad_params)
         bc_flow_loss = jnp.mean((pred - vel) ** 2)
 
-        rng, noise_rng = jax.random.split(rng)
-        noises = jax.random.normal(noise_rng, (batch_size, action_dim))
+        noises = jax.random.normal(actor_rng, (batch_size, action_dim))
         target_flow_actions = self.compute_flow_actions(noises, batch['observations'])
         actor_actions = self.network.select('actor_onestep_flow')(
-            batch['observations'], noises, params=grad_params
-        )
+            batch['observations'], noises, params=grad_params)
+        actor_actions = jnp.clip(actor_actions, -1, 1)
         distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
-        actor_actions = jnp.clip(actor_actions, -1, 1)
-        q_noises = jax.random.normal(rng, (batch_size, 1))
-        q1 = (
-            q_noises
-            + self.network.select('critic_flow1')(
-                q_noises,
-                jnp.zeros_like(q_noises),
-                batch['observations'],
-                actor_actions,
-            )
-        ).squeeze(-1)
-        q2 = (
-            q_noises
-            + self.network.select('critic_flow2')(
-                q_noises,
-                jnp.zeros_like(q_noises),
-                batch['observations'],
-                actor_actions,
-            )
-        ).squeeze(-1)
+        q_noises = jax.random.normal(q_rng, (batch_size, 1))
+        q1 = (q_noises + self.network.select('critic_flow1')(
+            q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
+        q2 = (q_noises + self.network.select('critic_flow2')(
+            q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
         if self.config['clip_flow_returns']:
             q1 = jnp.clip(
                 q1,
@@ -216,7 +200,6 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
                 self.config['min_reward'] / (1 - self.config['discount']),
                 self.config['max_reward'] / (1 - self.config['discount']),
             )
-
         if self.config['q_agg'] == 'min':
             q = jnp.minimum(q1, q2)
         else:
@@ -228,6 +211,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
             q_loss = lam * q_loss
 
         actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss + q_loss
+
         actions = self.sample_actions(batch['observations'], seed=rng)
         mse = jnp.mean((actions - batch['actions']) ** 2)
 
@@ -242,7 +226,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def total_loss(self, batch, grad_params, rng=None):
-        """Compute total loss."""
+        """Compute the total loss."""
         info = {}
         rng = rng if rng is not None else self.rng
         rng, critic_rng, actor_rng = jax.random.split(rng, 3)
@@ -259,7 +243,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         return loss, info
 
     def target_update(self, network, module_name):
-        """Update target network."""
+        """Update the target network."""
         new_target_params = jax.tree_util.tree_map(
             lambda p, tp: p * self.config['tau'] + tp * (1 - self.config['tau']),
             self.network.params[f'modules_{module_name}'],
@@ -269,7 +253,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def update(self, batch):
-        """Update the agent and return info."""
+        """Update the agent and return a new agent with information dictionary."""
         new_rng, rng = jax.random.split(self.rng)
 
         def loss_fn(grad_params):
@@ -292,7 +276,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         flow_network_name='critic_flow',
         return_jac_eps_prod=False,
     ):
-        """Compute returns from the return flow model with Euler integration."""
+        """Compute returns from the return flow model using the Euler method."""
         noisy_returns = noises
         noisy_jac_eps_prod = jnp.ones_like(noises)
         if init_times is None:
@@ -302,7 +286,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         step_size = (end_times - init_times) / self.config['num_flow_steps']
 
         def func(carry, i):
-            noisy_returns, noisy_jac_eps_prod = carry
+            (noisy_returns, noisy_jac_eps_prod) = carry
 
             times = i * step_size + init_times
             vector_field, jac_eps_prod = jax.jvp(
@@ -323,14 +307,12 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
             return (new_noisy_returns, new_noisy_jac_eps_prod), None
 
         (noisy_returns, noisy_jac_eps_prod), _ = jax.lax.scan(
-            func,
-            (noisy_returns, noisy_jac_eps_prod),
-            jnp.arange(self.config['num_flow_steps']),
-        )
+            func, (noisy_returns, noisy_jac_eps_prod), jnp.arange(self.config['num_flow_steps']))
 
         if return_jac_eps_prod:
             return noisy_returns, noisy_jac_eps_prod
-        return noisy_returns
+        else:
+            return noisy_returns
 
     @jax.jit
     def compute_flow_actions(
@@ -340,7 +322,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         init_times=None,
         end_times=None,
     ):
-        """Compute actions from BC flow with Euler integration."""
+        """Compute actions from the BC flow model using the Euler method."""
         noisy_actions = noises
         if init_times is None:
             init_times = jnp.zeros((*noisy_actions.shape[:-1], 1), dtype=noisy_actions.dtype)
@@ -352,7 +334,8 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
             (noisy_actions,) = carry
 
             times = i * step_size + init_times
-            vector_field = self.network.select('actor_flow')(observations, noisy_actions, times)
+            vector_field = self.network.select('actor_flow')(
+                observations, noisy_actions, times)
             new_noisy_actions = noisy_actions + vector_field * step_size
             if self.config['clip_flow_actions']:
                 new_noisy_actions = jnp.clip(new_noisy_actions, -1, 1)
@@ -360,33 +343,79 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
             return (new_noisy_actions,), None
 
         (noisy_actions,), _ = jax.lax.scan(
-            func,
-            (noisy_actions,),
-            jnp.arange(self.config['num_flow_steps']),
-        )
+            func, (noisy_actions,), jnp.arange(self.config['num_flow_steps']))
 
         if not self.config['clip_flow_actions']:
             noisy_actions = jnp.clip(noisy_actions, -1, 1)
+
         return noisy_actions
 
-    @jax.jit
+    @partial(jax.jit, static_argnames=('policy_extraction'))
     def sample_actions(
         self,
         observations,
         seed=None,
         temperature=1.0,
+        policy_extraction='rs',
     ):
-        """Sample actions from the one-step policy."""
+        """Sample actions using rejection sampling."""
         del temperature
-        noises = jax.random.normal(
-            seed,
-            (
-                *observations.shape[: -len(self.config['ob_dims'])],
-                self.config['action_dim'],
-            ),
-        )
-        actions = self.network.select('actor_onestep_flow')(observations, noises)
-        actions = jnp.clip(actions, -1, 1)
+        action_seed, q_seed = jax.random.split(seed)
+
+        if policy_extraction == 'rs':  # rejection sampling
+            actor_noises = jax.random.normal(
+                action_seed,
+                (*observations.shape[: -len(self.config['ob_dims'])],
+                 self.config['num_samples'], self.config['action_dim'])
+            )
+            n_observations = jnp.repeat(
+                jnp.expand_dims(observations, -2),
+                self.config['num_samples'],
+                axis=-2,
+            )
+            flow_actions = self.compute_flow_actions(actor_noises, n_observations)
+
+            q_noises = jax.random.normal(
+                q_seed,
+                (*observations.shape[: -len(self.config['ob_dims'])], self.config['num_samples'], 1)
+            )
+
+            q1 = (q_noises + self.network.select('critic_flow1')(
+                q_noises, jnp.zeros_like(q_noises), n_observations, flow_actions)).squeeze(-1)
+            q2 = (q_noises + self.network.select('critic_flow2')(
+                q_noises, jnp.zeros_like(q_noises), n_observations, flow_actions)).squeeze(-1)
+            if self.config['clip_flow_returns']:
+                q1 = jnp.clip(
+                    q1,
+                    self.config['min_reward'] / (1 - self.config['discount']),
+                    self.config['max_reward'] / (1 - self.config['discount']),
+                )
+                q2 = jnp.clip(
+                    q2,
+                    self.config['min_reward'] / (1 - self.config['discount']),
+                    self.config['max_reward'] / (1 - self.config['discount']),
+                )
+
+            if self.config['q_agg'] == 'min':
+                q = jnp.minimum(q1, q2)
+            else:
+                q = (q1 + q2) / 2
+
+            if len(q.shape) > 1:
+                actions = flow_actions[jnp.arange(q.shape[0]), jnp.argmax(q, axis=-1)]
+            else:
+                actions = flow_actions[jnp.argmax(q, axis=-1)]
+        elif policy_extraction == 'rpg':  # reparameterized policy gradient
+            actor_noises = jax.random.normal(
+                action_seed,
+                (*observations.shape[: -len(self.config['ob_dims'])], self.config['action_dim'])
+            )
+
+            actions = self.network.select('actor_onestep_flow')(observations, actor_noises)
+            actions = jnp.clip(actions, -1, 1)
+        else:
+            raise ValueError(f'Unknown policy_extraction: {policy_extraction}')
+
         return actions
 
     @classmethod
@@ -396,7 +425,13 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         example_batch,
         config,
     ):
-        """Create a new agent."""
+        """Create a new agent.
+
+        Args:
+            seed: Random seed.
+            example_batch: Example batch.
+            config: Configuration dictionary.
+        """
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
@@ -409,6 +444,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         min_reward = example_batch['min_reward']
         max_reward = example_batch['max_reward']
 
+        # Define encoders.
         encoders = dict()
         if config['encoder'] is not None:
             encoder_module = encoder_modules[config['encoder']]
@@ -417,6 +453,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
             encoders['actor_flow'] = encoder_module()
             encoders['actor_onestep_flow'] = encoder_module()
 
+        # Define networks.
         critic_flow1_def = ValueVectorField(
             hidden_dims=config['value_hidden_dims'],
             layer_norm=config['value_layer_norm'],
@@ -429,6 +466,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
             num_ensembles=1,
             encoder=encoders.get('critic_flow'),
         )
+        # Declare target critics explicitly to prevent errors for visual tasks.
         target_critic_flow1_def = ValueVectorField(
             hidden_dims=config['value_hidden_dims'],
             layer_norm=config['value_layer_norm'],
@@ -470,7 +508,7 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         network_params = network_def.init(init_rng, **network_args)['params']
         network = TrainState.create(network_def, network_params, tx=network_tx)
 
-        params = network.params
+        params = network_params
         params['modules_target_critic_flow1'] = params['modules_critic_flow1']
         params['modules_target_critic_flow2'] = params['modules_critic_flow2']
 
@@ -484,33 +522,34 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='implicit_flows',
-            ob_dims=ml_collections.config_dict.placeholder(list),
-            action_dim=ml_collections.config_dict.placeholder(int),
-            min_reward=ml_collections.config_dict.placeholder(float),
-            max_reward=ml_collections.config_dict.placeholder(float),
-            lr=3e-4,
-            batch_size=256,
-            actor_hidden_dims=(512, 512, 512, 512),
-            value_hidden_dims=(512, 512, 512, 512),
-            actor_layer_norm=True,
-            value_layer_norm=True,
-            discount=0.99,
-            tau=0.005,
-            ret_agg='adaptive_addq',  # 'min', 'mean', 'adaptive_addq', or soft weighting.
-            q_agg='mean',
-            clip_flow_actions=True,
-            clip_flow_returns=False,
-            addq_low_threshold=0.75,
-            addq_high_threshold=1.25,
-            addq_beta_low=0.25,
-            addq_beta_mid=0.5,
-            addq_beta_high=0.75,
-            addq_eps=1e-8,
-            num_flow_steps=10,
-            normalize_q_loss=False,
-            alpha=10.0,
-            encoder=ml_collections.config_dict.placeholder(str),
+            agent_name='implicit_flows',  # Agent name.
+            ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
+            action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
+            min_reward=ml_collections.config_dict.placeholder(float),  # Minimum reward (will be set automatically).
+            max_reward=ml_collections.config_dict.placeholder(float),  # Maximum reward (will be set automatically).
+            lr=3e-4,  # Learning rate.
+            batch_size=256,  # Batch size.
+            actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
+            value_hidden_dims=(512, 512, 512, 512),  # Value network hidden dimensions.
+            actor_layer_norm=True,  # Whether to use layer normalization for the actor.
+            value_layer_norm=True,  # Whether to use layer normalization for the value and the critic.
+            discount=0.99,  # Discount factor.
+            tau=0.005,  # Target network update rate.
+            ret_agg='adaptive_addq',  # 'min', 'mean', 'adaptive_addq', or soft.
+            q_agg='mean',  # Aggregation method for Q values.
+            clip_flow_actions=True,  # Whether to clip the intermediate flow actions.
+            clip_flow_returns=True,  # Whether to clip flow returns.
+            addq_low_threshold=0.75,  # Lower threshold for relative path uncertainty.
+            addq_high_threshold=1.25,  # Upper threshold for relative path uncertainty.
+            addq_beta_low=0.25,  # Conservative beta for low-uncertainty paths.
+            addq_beta_mid=0.5,  # Conservative beta for medium-uncertainty paths.
+            addq_beta_high=0.75,  # Conservative beta for high-uncertainty paths.
+            addq_eps=1e-8,  # Numerical stability epsilon.
+            alpha=10.0,  # Flow distillation coefficient.
+            normalize_q_loss=False,  # Whether to normalize the Q loss.
+            num_samples=16,  # Number of action samples for rejection sampling.
+            num_flow_steps=10,  # Number of flow steps.
+            encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )
     return config
