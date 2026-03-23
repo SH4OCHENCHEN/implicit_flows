@@ -4,6 +4,7 @@ from agents.fbrac import FBRACAgent
 from agents.fql import FQLAgent
 from agents.ifql import IFQLAgent
 from agents.implicit_flows import ImplicitFlowsAgent
+from agents.implicit_flows_v1 import ImplicitFlowsV1Agent
 from agents.iql import IQLAgent
 from agents.iqn import IQNAgent
 from agents.rebrac import ReBRACAgent
@@ -17,6 +18,7 @@ agents = dict(
     fql=FQLAgent,
     ifql=IFQLAgent,
     implicit_flows=ImplicitFlowsAgent,
+    implicit_flows_v1=ImplicitFlowsV1Agent,
     iql=IQLAgent,
     iqn=IQNAgent,
     rebrac=ReBRACAgent,

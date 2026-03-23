@@ -13,3 +13,4 @@ debug_video/
 *.pkl
 exp/
 logs/
+baseline_result/
