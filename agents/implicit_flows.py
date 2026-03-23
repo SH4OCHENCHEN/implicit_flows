@@ -1,5 +1,3 @@
-import os
-os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.2'
 from functools import partial
 from typing import Any
 
@@ -492,7 +490,7 @@ def get_config():
             min_reward=ml_collections.config_dict.placeholder(float),
             max_reward=ml_collections.config_dict.placeholder(float),
             lr=3e-4,
-            batch_size=1024,
+            batch_size=256,
             actor_hidden_dims=(512, 512, 512, 512),
             value_hidden_dims=(512, 512, 512, 512),
             actor_layer_norm=True,

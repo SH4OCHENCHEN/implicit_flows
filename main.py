@@ -1,5 +1,5 @@
 import os
-
+os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.2'
 import json
 import random
 import time
