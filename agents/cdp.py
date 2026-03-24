@@ -191,17 +191,36 @@ class CDPAgent(flax.struct.PyTreeNode):
         seed=None,
         temperature=1.0,
     ):
-        """Sample actions from the one-step policy."""
-        seed, action_seed = jax.random.split(seed)
-        noises = jax.random.normal(
+        """Sample actions with rejection sampling from one-step policy."""
+        del temperature
+        num_samples = self.config['num_samples'] if 'num_samples' in self.config else self.config['num_neg']
+        action_seed = seed
+        actor_noises = jax.random.normal(
             action_seed,
             (
                 *observations.shape[: -len(self.config['ob_dims'])],
+                num_samples,
                 self.config['action_dim'],
             ),
         )
-        actions = self.network.select('actor_onestep_flow')(observations, noises)
+        n_observations = jnp.repeat(
+            jnp.expand_dims(observations, -2),
+            num_samples,
+            axis=-2,
+        )
+        actions = self.network.select('actor_onestep_flow')(n_observations, actor_noises)
         actions = jnp.clip(actions, -1, 1)
+
+        qs = self.network.select('critic')(n_observations, actions=actions)
+        if self.config['q_agg'] == 'min':
+            q = qs.min(axis=0)
+        else:
+            q = qs.mean(axis=0)
+
+        if len(q.shape) > 1:
+            actions = actions[jnp.arange(q.shape[0]), jnp.argmax(q, axis=-1)]
+        else:
+            actions = actions[jnp.argmax(q, axis=-1)]
         return actions
 
     @classmethod
@@ -283,8 +302,9 @@ def get_config():
             q_agg='mean',  # Aggregation method for target Q values.
             alpha=10.0,  # Actor BC coefficient.
             cql_alpha=1.0,  # Conservative critic coefficient.
-            drift_temp=0.05,  # Temperature used in drifting BC.
+            drift_temp=0.5,  # Temperature used in drifting BC.
             num_neg=16,  # Number of negative/generated samples per state in actor loss.
+            num_samples=16,  # Number of sampled actions for rejection sampling.
             normalize_q_loss=False,  # Whether to normalize the Q loss.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
