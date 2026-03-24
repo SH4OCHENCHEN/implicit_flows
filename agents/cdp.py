@@ -141,6 +141,7 @@ class CDPAgent(flax.struct.PyTreeNode):
             'q_loss': q_loss,
             'q': q.mean(),
             'mse': mse,
+            'pos_gap': jnp.linalg.norm(raw_actor_actions - pos_actions, axis=-1).mean(),
         }
 
     @jax.jit
