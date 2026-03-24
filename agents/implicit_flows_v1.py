@@ -541,7 +541,7 @@ def get_config():
             addq_eps=1e-8,
             num_samples=16,
             num_flow_steps=10,
-            normalize_q_loss=False,
+            normalize_q_loss=True,
             alpha=10.0,
             encoder=ml_collections.config_dict.placeholder(str),
         )
