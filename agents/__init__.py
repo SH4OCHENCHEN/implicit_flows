@@ -1,4 +1,5 @@
 from agents.c51 import C51Agent
+from agents.cdp import CDPAgent
 from agents.codac import CODACAgent
 from agents.fbrac import FBRACAgent
 from agents.fql import FQLAgent
@@ -13,6 +14,7 @@ from agents.value_flows import ValueFlowsAgent
 
 agents = dict(
     c51=C51Agent,
+    cdp=CDPAgent,
     codac=CODACAgent,
     fbrac=FBRACAgent,
     fql=FQLAgent,

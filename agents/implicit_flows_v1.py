@@ -64,8 +64,10 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         )
         ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
         ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
+
         alpha1 = ret_stds2 / (ret_stds1 + ret_stds2 + 1e-8)
         alpha2 = ret_stds1 / (ret_stds1 + ret_stds2 + 1e-8)
+
         conservative_beta = jnp.zeros_like(alpha1)
         if self.config['ret_agg'] == 'adaptive_addq':
             _, _, conservative_beta = self.compute_addq_path_beta(ret_stds1, ret_stds2)
@@ -117,7 +119,10 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         elif self.config['ret_agg'] == 'mean':
             mixed_next_vector_field = (next_vector_field1 + next_vector_field2) / 2
         elif self.config['ret_agg'] == 'adaptive_addq':
-            mixed_next_vector_field = (1.0 - conservative_beta) * soft_next_vector_field + conservative_beta * hard_next_vector_field
+            mixed_next_vector_field = (
+                (1.0 - conservative_beta) * soft_next_vector_field
+                + conservative_beta * hard_next_vector_field
+            )
         else:
             mixed_next_vector_field = soft_next_vector_field
 
@@ -126,25 +131,10 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         critic_loss = implicit_loss.mean()
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
-        q1 = (
-            q_noises
-            + self.network.select('critic_flow1')(
-                q_noises,
-                jnp.zeros_like(q_noises),
-                batch['observations'],
-                batch['actions'],
-            )
-        ).squeeze(-1)
-        q2 = (
-            q_noises
-            + self.network.select('critic_flow2')(
-                q_noises,
-                jnp.zeros_like(q_noises),
-                batch['observations'],
-                batch['actions'],
-            )
-        ).squeeze(-1)
-
+        q1 = (q_noises + self.network.select('critic_flow1')(
+            q_noises, jnp.zeros_like(q_noises), batch['observations'], batch['actions'])).squeeze(-1)
+        q2 = (q_noises + self.network.select('critic_flow2')(
+            q_noises, jnp.zeros_like(q_noises), batch['observations'], batch['actions'])).squeeze(-1)
         if self.config['clip_flow_returns']:
             q1 = jnp.clip(
                 q1,
@@ -156,7 +146,6 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
                 self.config['min_reward'] / (1 - self.config['discount']),
                 self.config['max_reward'] / (1 - self.config['discount']),
             )
-
         if self.config['q_agg'] == 'min':
             q = jnp.minimum(q1, q2)
         else:
