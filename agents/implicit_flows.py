@@ -535,7 +535,7 @@ def get_config():
             value_layer_norm=True,  # Whether to use layer normalization for the value and the critic.
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
-            ret_agg='adaptive_addq',  # 'min', 'mean', 'adaptive_addq', or soft.
+            ret_agg='mean',  # 'min', 'mean', 'adaptive_addq', or soft.
             q_agg='mean',  # Aggregation method for Q values.
             clip_flow_actions=True,  # Whether to clip the intermediate flow actions.
             clip_flow_returns=True,  # Whether to clip flow returns.

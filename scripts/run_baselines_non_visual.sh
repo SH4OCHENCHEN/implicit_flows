@@ -9,6 +9,7 @@ SAVE_ROOT="${SAVE_ROOT:-baseline_result}"
 RUN_OFFLINE="${RUN_OFFLINE:-1}"
 RUN_ONLINE="${RUN_ONLINE:-1}"
 RUN_D4RL="${RUN_D4RL:-1}"
+RUN_VALUE_FLOWS="${RUN_VALUE_FLOWS:-1}"
 SEEDS_STR="${SEEDS:-0}"
 TASK_IDS_STR="${TASK_IDS:-task1 task2 task3 task4 task5}"
 
@@ -44,6 +45,44 @@ run_exp() {
 for seed in "${SEED_LIST[@]}"; do
   if [[ "$RUN_OFFLINE" == "1" ]]; then
     for task_id in "${TASK_IDS[@]}"; do
+      if [[ "$RUN_VALUE_FLOWS" == "1" ]]; then
+        run_exp "ValueFlows-cube-double-${task_id}-seed${seed}" \
+          --seed="${seed}" \
+          --env_name="cube-double-play-singletask-${task_id}-v0" \
+          --agent=agents/value_flows.py \
+          --agent.discount=0.995 \
+          --agent.confidence_weight_temp=3 || true
+
+        run_exp "ValueFlows-cube-triple-${task_id}-seed${seed}" \
+          --seed="${seed}" \
+          --env_name="cube-triple-play-singletask-${task_id}-v0" \
+          --agent=agents/value_flows.py \
+          --agent.discount=0.995 \
+          --agent.bcfm_lambda=3 \
+          --agent.confidence_weight_temp=0.03 || true
+
+        run_exp "ValueFlows-puzzle3-${task_id}-seed${seed}" \
+          --seed="${seed}" \
+          --env_name="puzzle-3x3-play-singletask-${task_id}-v0" \
+          --agent=agents/value_flows.py \
+          --agent.bcfm_lambda=0.5 \
+          --agent.ret_agg=min || true
+
+        run_exp "ValueFlows-puzzle4-${task_id}-seed${seed}" \
+          --seed="${seed}" \
+          --env_name="puzzle-4x4-play-singletask-${task_id}-v0" \
+          --agent=agents/value_flows.py \
+          --agent.bcfm_lambda=3 \
+          --agent.confidence_weight_temp=100 \
+          --agent.q_agg=min || true
+
+        run_exp "ValueFlows-scene-${task_id}-seed${seed}" \
+          --seed="${seed}" \
+          --env_name="scene-play-singletask-${task_id}-v0" \
+          --agent=agents/value_flows.py \
+          --agent.ret_agg=min || true
+      fi
+
       run_exp "IQL-${task_id}-seed${seed}" \
         --seed="${seed}" \
         --env_name="cube-triple-play-singletask-${task_id}-v0" \
@@ -184,6 +223,21 @@ for seed in "${SEED_LIST[@]}"; do
   fi
 
   if [[ "$RUN_D4RL" == "1" ]]; then
+    if [[ "$RUN_VALUE_FLOWS" == "1" ]]; then
+      run_exp "ValueFlows-pen-human-seed${seed}" --seed="${seed}" --env_name=pen-human-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=3 --agent.ret_agg=min --agent.q_agg=min || true
+      run_exp "ValueFlows-pen-cloned-seed${seed}" --seed="${seed}" --env_name=pen-cloned-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=3 --agent.q_agg=min || true
+      run_exp "ValueFlows-pen-expert-seed${seed}" --seed="${seed}" --env_name=pen-expert-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=3 --agent.q_agg=min || true
+      run_exp "ValueFlows-door-human-seed${seed}" --seed="${seed}" --env_name=door-human-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=3 --agent.q_agg=min || true
+      run_exp "ValueFlows-door-cloned-seed${seed}" --seed="${seed}" --env_name=door-cloned-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=10 --agent.ret_agg=min --agent.q_agg=min || true
+      run_exp "ValueFlows-door-expert-seed${seed}" --seed="${seed}" --env_name=door-expert-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=10 --agent.ret_agg=min --agent.q_agg=min || true
+      run_exp "ValueFlows-hammer-human-seed${seed}" --seed="${seed}" --env_name=hammer-human-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=3 --agent.q_agg=min || true
+      run_exp "ValueFlows-hammer-cloned-seed${seed}" --seed="${seed}" --env_name=hammer-cloned-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=3 --agent.q_agg=min || true
+      run_exp "ValueFlows-hammer-expert-seed${seed}" --seed="${seed}" --env_name=hammer-expert-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=10 --agent.ret_agg=min --agent.q_agg=min || true
+      run_exp "ValueFlows-relocate-human-seed${seed}" --seed="${seed}" --env_name=relocate-human-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=10 --agent.ret_agg=min --agent.q_agg=min || true
+      run_exp "ValueFlows-relocate-cloned-seed${seed}" --seed="${seed}" --env_name=relocate-cloned-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=3 --agent.q_agg=min || true
+      run_exp "ValueFlows-relocate-expert-seed${seed}" --seed="${seed}" --env_name=relocate-expert-v1 --agent=agents/value_flows.py --agent.bcfm_lambda=3 --agent.ret_agg=min --agent.q_agg=min || true
+    fi
+
     run_exp "C51-pen-human-seed${seed}" --seed="${seed}" --env_name=pen-human-v1 --agent=agents/c51.py --agent.q_agg=min || true
     run_exp "C51-pen-cloned-seed${seed}" --seed="${seed}" --env_name=pen-cloned-v1 --agent=agents/c51.py || true
     run_exp "C51-pen-expert-seed${seed}" --seed="${seed}" --env_name=pen-expert-v1 --agent=agents/c51.py --agent.q_agg=min || true
@@ -225,6 +279,70 @@ for seed in "${SEED_LIST[@]}"; do
   fi
 
   if [[ "$RUN_ONLINE" == "1" ]]; then
+    if [[ "$RUN_VALUE_FLOWS" == "1" ]]; then
+      run_exp "ValueFlows-antmaze-online-seed${seed}" \
+        --seed="${seed}" \
+        --env_name=antmaze-large-navigate-singletask-task1-v0 \
+        --online_steps=1000000 \
+        --agent=agents/value_flows.py \
+        --agent.bcfm_lambda=10 \
+        --agent.confidence_weight_temp=0.01 \
+        --agent.alpha=30 \
+        --agent.q_agg=min || true
+
+      run_exp "ValueFlows-humanoidmaze-online-seed${seed}" \
+        --seed="${seed}" \
+        --env_name=humanoidmaze-medium-navigate-singletask-task1-v0 \
+        --online_steps=1000000 \
+        --agent=agents/value_flows.py \
+        --agent.discount=0.995 \
+        --agent.bcfm_lambda=3 \
+        --agent.confidence_weight_temp=0.3 \
+        --agent.alpha=100 \
+        --agent.q_agg=min \
+        --agent.ret_agg=min || true
+
+      run_exp "ValueFlows-cube-double-online-seed${seed}" \
+        --seed="${seed}" \
+        --env_name=cube-double-play-singletask-task2-v0 \
+        --online_steps=1000000 \
+        --agent=agents/value_flows.py \
+        --agent.discount=0.995 \
+        --agent.bcfm_lambda=1 \
+        --agent.confidence_weight_temp=3 \
+        --agent.alpha=300 || true
+
+      run_exp "ValueFlows-cube-triple-online-seed${seed}" \
+        --seed="${seed}" \
+        --env_name=cube-triple-play-singletask-task1-v0 \
+        --online_steps=1000000 \
+        --agent=agents/value_flows.py \
+        --agent.discount=0.995 \
+        --agent.bcfm_lambda=3 \
+        --agent.confidence_weight_temp=0.03 \
+        --agent.alpha=300 || true
+
+      run_exp "ValueFlows-puzzle4-online-seed${seed}" \
+        --seed="${seed}" \
+        --env_name=puzzle-4x4-play-singletask-task4-v0 \
+        --online_steps=1000000 \
+        --agent=agents/value_flows.py \
+        --agent.bcfm_lambda=3 \
+        --agent.confidence_weight_temp=0.1 \
+        --agent.alpha=300 \
+        --agent.q_agg=min || true
+
+      run_exp "ValueFlows-scene-online-seed${seed}" \
+        --seed="${seed}" \
+        --env_name=scene-play-singletask-task2-v0 \
+        --online_steps=1000000 \
+        --agent=agents/value_flows.py \
+        --agent.bcfm_lambda=1 \
+        --agent.confidence_weight_temp=0.3 \
+        --agent.alpha=300 \
+        --agent.ret_agg=min || true
+    fi
+
     run_exp "IQL-antmaze-online-seed${seed}" \
       --seed="${seed}" \
       --env_name=antmaze-large-navigate-singletask-task1-v0 \
@@ -340,3 +458,4 @@ if [[ "${#FAILED_JOBS[@]}" -gt 0 ]]; then
 fi
 
 echo "All requested baseline experiments finished."
+
