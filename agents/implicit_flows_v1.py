@@ -540,7 +540,7 @@ def get_config():
             value_layer_norm=True,
             discount=0.99,
             tau=0.005,
-            ret_agg='a',  # 'min', 'mean', 'adaptive_addq', or soft weighting.
+            ret_agg='mean',  # 'min', 'mean', 'adaptive_addq', or soft weighting.
             q_agg='mean',
             clip_flow_actions=True,
             clip_flow_returns=True,
