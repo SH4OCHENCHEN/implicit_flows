@@ -305,7 +305,7 @@ def get_config():
             drift_temp=0.5,  # Temperature used in drifting BC.
             num_neg=16,  # Number of negative/generated samples per state in actor loss.
             num_samples=16,  # Number of sampled actions for rejection sampling.
-            normalize_q_loss=False,  # Whether to normalize the Q loss.
+            normalize_q_loss=True,  # Whether to normalize the Q loss.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )
