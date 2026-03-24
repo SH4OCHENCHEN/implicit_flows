@@ -130,7 +130,7 @@ class CDPAgent(flax.struct.PyTreeNode):
             lam = jax.lax.stop_gradient(1 / jnp.abs(q).mean())
             q_loss = lam * q_loss
 
-        actor_loss = self.config['alpha'] * bc_loss + q_loss
+        actor_loss = self.config['alpha'] * bc_loss #+ q_loss
 
         actions = self.sample_actions(batch['observations'], seed=rng)
         mse = jnp.mean((actions - batch['actions']) ** 2)
@@ -302,7 +302,7 @@ def get_config():
             q_agg='mean',  # Aggregation method for target Q values.
             alpha=10.0,  # Actor BC coefficient.
             cql_alpha=0.0,  # Conservative critic coefficient.
-            drift_temp=5,  # Temperature used in drifting BC.
+            drift_temp=50,  # Temperature used in drifting BC.
             num_neg=16,  # Number of negative/generated samples per state in actor loss.
             num_samples=16,  # Number of sampled actions for rejection sampling.
             normalize_q_loss=True,  # Whether to normalize the Q loss.
