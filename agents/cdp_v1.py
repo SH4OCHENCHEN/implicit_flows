@@ -145,7 +145,7 @@ class CDPV1Agent(flax.struct.PyTreeNode):
         )
         bc_loss = drifting_loss(raw_actor_actions, pos_actions, temp=self.config['drift_temp'])
 
-        actor_loss = self.config['alpha'] * bc_loss
+        actor_loss = bc_loss
 
         actions = self.sample_actions(batch['observations'], seed=mse_rng)
         mse = jnp.mean((actions - batch['actions']) ** 2)
@@ -155,7 +155,6 @@ class CDPV1Agent(flax.struct.PyTreeNode):
             'bc_loss': bc_loss,
             'pos_q': sampled_pos_q.mean(),
             'mse': mse,
-            'pos_gap': jnp.linalg.norm(raw_actor_actions - pos_actions, axis=-1).mean(),
         }
 
     @jax.jit
@@ -314,13 +313,11 @@ def get_config():
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
-            q_agg='mean',  # Aggregation method for target Q values.
-            alpha=10.0,  # Actor BC coefficient.
-            cql_alpha=0.0,  # Conservative critic coefficient.
-            drift_temp=50,  # Temperature used in drifting BC.
+            q_agg='mean',  # Aggregation method for target Q values.\
+            cql_alpha=1.0,  # Conservative critic coefficient.
+            drift_temp=10,  # Temperature used in drifting BC.
             num_neg=16,  # Number of negative/generated samples per state in actor loss.
             num_samples=16,  # Number of sampled actions for rejection sampling.
-            normalize_q_loss=True,  # Whether to normalize the Q loss.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )
