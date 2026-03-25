@@ -4,6 +4,7 @@ from typing import Any
 import flax
 import jax
 import jax.numpy as jnp
+import jax.scipy as jsp
 import ml_collections
 import optax
 
@@ -65,8 +66,9 @@ class CDPV1Agent(flax.struct.PyTreeNode):
     config: Any = nonpytree_field()
 
     def critic_loss(self, batch, grad_params, rng):
-        """Compute the TD critic loss with a conservative OOD penalty."""
-        rng, sample_rng, cql_rng = jax.random.split(rng, 3)
+        """Compute the TD critic loss with a multi-sample CQL penalty."""
+        batch_size, action_dim = batch['actions'].shape
+        rng, sample_rng, cql_actor_rng, cql_uniform_rng = jax.random.split(rng, 4)
         next_actions = self.sample_actions(batch['next_observations'], seed=sample_rng)
         next_actions = jnp.clip(next_actions, -1, 1)
 
@@ -78,14 +80,30 @@ class CDPV1Agent(flax.struct.PyTreeNode):
 
         target_q = batch['rewards'] + self.config['discount'] * batch['masks'] * next_q
 
-        q = self.network.select('critic')(batch['observations'], actions=batch['actions'], params=grad_params)
-        bellman_loss = jnp.square(q - target_q).mean()
+        q_data = self.network.select('critic')(batch['observations'], actions=batch['actions'], params=grad_params)
+        bellman_loss = jnp.square(q_data - target_q).mean()
 
-        policy_actions = self.sample_actions(batch['observations'], seed=cql_rng)
-        policy_actions = jnp.clip(policy_actions, -1, 1)
-        q_pi = self.network.select('critic')(batch['observations'], actions=policy_actions, params=grad_params)
-        q_beta = self.network.select('critic')(batch['observations'], actions=batch['actions'], params=grad_params)
-        ood_penalty = self.config['cql_alpha'] * ((q_pi - q_beta).mean())
+        cql_num_samples = self.config['cql_num_samples']
+        obs_repeat = jnp.repeat(batch['observations'][:, None, ...], cql_num_samples, axis=1)
+        obs_flat = obs_repeat.reshape((batch_size * cql_num_samples, *batch['observations'].shape[1:]))
+
+        actor_noises = jax.random.normal(cql_actor_rng, (batch_size, cql_num_samples, action_dim))
+        actor_noises_flat = actor_noises.reshape((batch_size * cql_num_samples, action_dim))
+        actor_sampled_actions = self.network.select('actor_onestep_flow')(obs_flat, actor_noises_flat)
+        actor_sampled_actions = jnp.clip(actor_sampled_actions, -1, 1)
+        q_actor_samples = self.network.select('critic')(obs_flat, actions=actor_sampled_actions, params=grad_params)
+        q_actor_samples = q_actor_samples.reshape((q_actor_samples.shape[0], batch_size, cql_num_samples))
+
+        uniform_actions = jax.random.uniform(
+            cql_uniform_rng, (batch_size, cql_num_samples, action_dim), minval=-1.0, maxval=1.0
+        )
+        uniform_actions_flat = uniform_actions.reshape((batch_size * cql_num_samples, action_dim))
+        q_uniform_samples = self.network.select('critic')(obs_flat, actions=uniform_actions_flat, params=grad_params)
+        q_uniform_samples = q_uniform_samples.reshape((q_uniform_samples.shape[0], batch_size, cql_num_samples))
+
+        cql_cat = jnp.concatenate([q_actor_samples, q_uniform_samples], axis=-1)
+        cql_lse = jsp.special.logsumexp(cql_cat / self.config['cql_temp'], axis=-1) * self.config['cql_temp']
+        ood_penalty = self.config['cql_alpha'] * (cql_lse - q_data).mean()
 
         critic_loss = bellman_loss + ood_penalty
 
@@ -93,11 +111,10 @@ class CDPV1Agent(flax.struct.PyTreeNode):
             'critic_loss': critic_loss,
             'bellman_loss': bellman_loss,
             'ood_penalty': ood_penalty,
-            'q_pi_mean': q_pi.mean(),
-            'q_beta_mean': q_beta.mean(),
-            'q_mean': q.mean(),
-            'q_max': q.max(),
-            'q_min': q.min(),
+            'q_data_mean': q_data.mean(),
+            'q_actor_samples_mean': q_actor_samples.mean(),
+            'q_uniform_samples_mean': q_uniform_samples.mean(),
+            'cql_lse_mean': cql_lse.mean(),
         }
 
     def actor_loss(self, batch, grad_params, rng):
@@ -105,6 +122,7 @@ class CDPV1Agent(flax.struct.PyTreeNode):
         batch_size, action_dim = batch['actions'].shape
         num_neg = self.config['num_neg']
         num_pos_samples = self.config['num_samples']
+        pos_topk = min(self.config['pos_topk'], num_pos_samples)
         rng, noise_rng, pos_rng, mse_rng = jax.random.split(rng, 4)
 
         # [B, G, D]: generate multiple raw actor actions per state.
@@ -118,7 +136,7 @@ class CDPV1Agent(flax.struct.PyTreeNode):
         )
         raw_actor_actions = raw_actions_flat.reshape((batch_size, num_neg, action_dim))
 
-        # Positive samples include dataset action and sampled max-Q action.
+        # Positive samples include dataset action and sampled top-k Q actions.
         pos_noises = jax.random.normal(pos_rng, (batch_size, num_pos_samples, action_dim))
         pos_obs_repeat = jnp.repeat(batch['observations'][:, None, ...], num_pos_samples, axis=1)
         pos_obs_flat = pos_obs_repeat.reshape((batch_size * num_pos_samples, *batch['observations'].shape[1:]))
@@ -136,11 +154,13 @@ class CDPV1Agent(flax.struct.PyTreeNode):
         else:
             sampled_pos_q = sampled_pos_qs.mean(axis=0)
         sampled_pos_q = sampled_pos_q.reshape((batch_size, num_pos_samples))
-        best_idx = jnp.argmax(sampled_pos_q, axis=-1)
-        best_pos_actions = sampled_pos_actions[jnp.arange(batch_size), best_idx]
+        _, topk_idx = jax.lax.top_k(sampled_pos_q, pos_topk)  # [B, K]
+        topk_idx_expanded = jnp.expand_dims(topk_idx, axis=-1)  # [B, K, 1]
+        topk_idx_expanded = jnp.repeat(topk_idx_expanded, action_dim, axis=-1)  # [B, K, D]
+        topk_pos_actions = jnp.take_along_axis(sampled_pos_actions, topk_idx_expanded, axis=1)  # [B, K, D]
 
         pos_actions = jnp.concatenate(
-            [batch['actions'][:, None, :], best_pos_actions[:, None, :]],
+            [batch['actions'][:, None, :], topk_pos_actions],
             axis=1,
         )
         bc_loss = drifting_loss(raw_actor_actions, pos_actions, temp=self.config['drift_temp'])
@@ -154,6 +174,7 @@ class CDPV1Agent(flax.struct.PyTreeNode):
             'actor_loss': actor_loss,
             'bc_loss': bc_loss,
             'pos_q': sampled_pos_q.mean(),
+            'pos_q_topk': jnp.take_along_axis(sampled_pos_q, topk_idx, axis=1).mean(),
             'mse': mse,
         }
 
@@ -205,36 +226,17 @@ class CDPV1Agent(flax.struct.PyTreeNode):
         seed=None,
         temperature=1.0,
     ):
-        """Sample actions with rejection sampling from one-step policy."""
-        del temperature
-        num_samples = self.config['num_samples'] if 'num_samples' in self.config else self.config['num_neg']
-        action_seed = seed
-        actor_noises = jax.random.normal(
+        """Sample actions from the one-step policy."""
+        seed, action_seed = jax.random.split(seed)
+        noises = jax.random.normal(
             action_seed,
             (
                 *observations.shape[: -len(self.config['ob_dims'])],
-                num_samples,
                 self.config['action_dim'],
             ),
         )
-        n_observations = jnp.repeat(
-            jnp.expand_dims(observations, -2),
-            num_samples,
-            axis=-2,
-        )
-        actions = self.network.select('actor_onestep_flow')(n_observations, actor_noises)
+        actions = self.network.select('actor_onestep_flow')(observations, noises)
         actions = jnp.clip(actions, -1, 1)
-
-        qs = self.network.select('critic')(n_observations, actions=actions)
-        if self.config['q_agg'] == 'min':
-            q = qs.min(axis=0)
-        else:
-            q = qs.mean(axis=0)
-
-        if len(q.shape) > 1:
-            actions = actions[jnp.arange(q.shape[0]), jnp.argmax(q, axis=-1)]
-        else:
-            actions = actions[jnp.argmax(q, axis=-1)]
         return actions
 
     @classmethod
@@ -313,11 +315,14 @@ def get_config():
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
-            q_agg='mean',  # Aggregation method for target Q values.\
+            q_agg='min',  # Aggregation method for target Q values.\
             cql_alpha=1.0,  # Conservative critic coefficient.
-            drift_temp=10,  # Temperature used in drifting BC.
+            cql_temp=1.0,  # Temperature for CQL logsumexp.
+            cql_num_samples=8,  # Number of actor/uniform samples per state for CQL penalty.
+            drift_temp=1,  # Temperature used in drifting BC.
             num_neg=16,  # Number of negative/generated samples per state in actor loss.
-            num_samples=16,  # Number of sampled actions for rejection sampling.
+            num_samples=16,  # Number of sampled actions used to mine positive actions.
+            pos_topk=2,  # Number of top-Q sampled positives used in drifting loss.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )
