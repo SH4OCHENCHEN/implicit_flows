@@ -37,7 +37,10 @@ def compute_drift(gen: jnp.ndarray, pos: jnp.ndarray, temp: float = 0.05):
     large_eye = jnp.eye(g, dtype=dist.dtype) * 1e6
     dist = dist.at[..., :, :g].add(large_eye)
 
-    kernel = jnp.exp(-dist / temp)
+    # Dimension-adaptive temperature: scale by sqrt(action_dim).
+    action_dim = gen.shape[-1]
+    adaptive_temp = temp * jnp.sqrt(jnp.asarray(action_dim, dtype=dist.dtype))
+    kernel = jnp.exp(-dist / adaptive_temp)
 
     normalizer = kernel.sum(axis=-1, keepdims=True) * kernel.sum(axis=-2, keepdims=True)
     normalizer = jnp.sqrt(jnp.clip(normalizer, a_min=1e-12))
