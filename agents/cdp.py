@@ -296,7 +296,7 @@ def get_config():
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
             value_hidden_dims=(512, 512, 512, 512),  # Value network hidden dimensions.
             layer_norm=True,  # Whether to use layer normalization.
-            actor_layer_norm=False,  # Whether to use layer normalization for the actor.
+            actor_layer_norm=True,  # Whether to use layer normalization for the actor.
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
             q_agg='mean',  # Aggregation method for target Q values.
