@@ -573,6 +573,7 @@ def get_config():
             addq_beta_mid=0.5,  # Conservative beta for medium-uncertainty paths.
             addq_beta_high=0.75,  # Conservative beta for high-uncertainty paths.
             addq_eps=1e-8,  # Numerical stability epsilon.
+            confidence_weight_temp=0.3,  # Temperature for the confidence weights.
             alpha=10.0,  # Flow distillation coefficient.
             normalize_q_loss=False,  # Whether to normalize the Q loss.
             num_samples=16,  # Number of action samples for rejection sampling.
