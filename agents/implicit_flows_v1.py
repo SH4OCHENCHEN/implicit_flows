@@ -45,16 +45,6 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             flow_network_name='target_critic_flow2',
             return_jac_eps_prod=True,
         )
-        ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
-        ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
-
-        ret_stds = 0.5 * (ret_stds1 + ret_stds2)
-        if self.config['q_agg'] == 'min':
-            ret_stds = jnp.minimum(ret_stds1, ret_stds2)
-        else:
-            ret_stds = (ret_stds1 + ret_stds2) / 2
-        weights = jax.nn.sigmoid(-self.config['confidence_weight_temp'] / ret_stds) + 0.5
-        weights = jax.lax.stop_gradient(weights)
 
         if self.config['ret_agg'] == 'min':
             noisy_next_returns_bellman = jnp.minimum(noisy_next_returns1, noisy_next_returns2)
@@ -67,9 +57,36 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
 
         noises = jax.random.normal(ret_rng, (batch_size, 1))
         r_noises = noises - self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_noises
-        rt = times * jnp.expand_dims(batch['rewards'], axis=-1) + (1 - times) * r_noises
-        noisy_returns = rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * noisy_next_returns_bellman
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
+        
+        noisy_returns1, ret_jac_eps_prods1 = self.compute_flow_returns(
+            next_noises,
+            batch['next_observations'],
+            next_actions,
+            end_times=times,
+            flow_network_name='target_critic_flow1',
+            return_jac_eps_prod=True,
+        )
+        noisy_returns2, ret_jac_eps_prods2 = self.compute_flow_returns(
+            next_noises,
+            batch['next_observations'],
+            next_actions,
+            end_times=times,
+            flow_network_name='target_critic_flow2',
+            return_jac_eps_prod=True,
+        )
+        ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
+        ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
+
+        ret_stds = 0.5 * (ret_stds1 + ret_stds2)
+        if self.config['q_agg'] == 'min':
+            ret_stds = jnp.minimum(ret_stds1, ret_stds2)
+        else:
+            ret_stds = (ret_stds1 + ret_stds2) / 2
+        weights = jax.nn.sigmoid(-self.config['confidence_weight_temp'] / ret_stds) + 0.5
+        weights = jax.lax.stop_gradient(weights)
+
+        noisy_returns = (noisy_returns1 + noisy_returns2) / 2
 
         vector_field1 = self.network.select('critic_flow1')(
             noisy_returns, times, batch['observations'], batch['actions'], params=grad_params
