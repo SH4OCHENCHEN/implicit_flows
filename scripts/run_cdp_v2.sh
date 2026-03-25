@@ -43,13 +43,6 @@ run_exp() {
 for seed in "${SEED_LIST[@]}"; do
   if [[ "$RUN_OGBENCH" == "1" ]]; then
     for task_id in "${TASK_IDS[@]}"; do
-      run_exp "cdp_v2-scene-${task_id}-seed${seed}" \
-        --seed="${seed}" \
-        --env_name="scene-play-singletask-${task_id}-v0" \
-        --agent=agents/cdp_v2.py \
-        --agent.q_agg=min \
-        --agent.cql_alpha=1.0 || true
-
       run_exp "cdp_v2-cube-double-${task_id}-seed${seed}" \
         --seed="${seed}" \
         --env_name="cube-double-play-singletask-${task_id}-v0" \
