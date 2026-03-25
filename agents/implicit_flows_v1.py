@@ -45,32 +45,41 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             flow_network_name='target_critic_flow2',
             return_jac_eps_prod=True,
         )
-
-        if self.config['ret_agg'] == 'min':
-            noisy_next_returns_bellman = jnp.minimum(noisy_next_returns1, noisy_next_returns2)
-        elif self.config['ret_agg'] == 'mean':
-            noisy_next_returns_bellman = (
-                noisy_next_returns1 + noisy_next_returns2
-            ) / 2
-        else:
-            raise ValueError(f"Invalid ret_agg: {self.config['ret_agg']}")
+        ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
+        ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
+        # Softmax over inverse stds: lower-uncertainty branch gets higher weight.
+        alpha_logits = jnp.concatenate(
+            (
+                1.0 / (ret_stds1 + 1e-8),
+                1.0 / (ret_stds2 + 1e-8),
+            ),
+            axis=-1,
+        )
+        alpha_logits = self.config['alpha_softmax_temp'] * alpha_logits
+        alpha = jax.nn.softmax(alpha_logits, axis=-1)
+        alpha1 = alpha[..., :1]
+        alpha2 = alpha[..., 1:2]
+        soft_next_returns_from_noises = alpha1 * noisy_next_returns1 + alpha2 * noisy_next_returns2
+        hard_next_returns_from_noises = jnp.minimum(noisy_next_returns1, noisy_next_returns2)
 
         noises = jax.random.normal(ret_rng, (batch_size, 1))
         r_noises = noises - self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_noises
+        rt = times * jnp.expand_dims(batch['rewards'], axis=-1) + (1 - times) * r_noises
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
-        
-        noisy_returns1, ret_jac_eps_prods1 = self.compute_flow_returns(
+
+        # Compute return stds for confidence weighting.
+        _, ret_jac_eps_prods1 = self.compute_flow_returns(
             next_noises,
-            batch['next_observations'],
-            next_actions,
+            batch['observations'],
+            batch['actions'],
             end_times=times,
             flow_network_name='target_critic_flow1',
             return_jac_eps_prod=True,
         )
-        noisy_returns2, ret_jac_eps_prods2 = self.compute_flow_returns(
+        _, ret_jac_eps_prods2 = self.compute_flow_returns(
             next_noises,
-            batch['next_observations'],
-            next_actions,
+            batch['observations'],
+            batch['actions'],
             end_times=times,
             flow_network_name='target_critic_flow2',
             return_jac_eps_prod=True,
@@ -86,7 +95,43 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         weights = jax.nn.sigmoid(-self.config['confidence_weight_temp'] / ret_stds) + 0.5
         weights = jax.lax.stop_gradient(weights)
 
-        noisy_returns = (noisy_returns1 + noisy_returns2) / 2
+        # Query target vector fields at provisional soft returns for disagreement estimation.
+        provisional_next_returns = soft_next_returns_from_noises
+        next_vector_field1 = self.network.select('target_critic_flow1')(
+            provisional_next_returns, times, batch['next_observations'], next_actions
+        )
+        next_vector_field2 = self.network.select('target_critic_flow2')(
+            provisional_next_returns, times, batch['next_observations'], next_actions
+        )
+
+        soft_next_vector_field = alpha1 * next_vector_field1 + alpha2 * next_vector_field2
+        hard_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
+
+        # Disagreement-driven hard/soft coefficient.
+        returns_disagreement = jnp.abs(noisy_next_returns1 - noisy_next_returns2)
+        vectorfield_disagreement = jnp.abs(next_vector_field1 - next_vector_field2)
+        disagreement = returns_disagreement + vectorfield_disagreement
+        # Fixed disagreement mapping: no batch normalization, only local disagreement response.
+        disagreement_response = (
+            jax.nn.softplus(self.config['disagreement_softplus_scale'] * disagreement)
+            - jnp.log(2.0)
+        )
+        disagreement_response = jnp.maximum(disagreement_response, 0.0)
+        hard_coeff = disagreement_response / (1.0 + disagreement_response)
+        hard_coeff = jax.lax.stop_gradient(hard_coeff)
+
+        mixed_next_returns = (
+            (1.0 - hard_coeff) * soft_next_returns_from_noises
+            + hard_coeff * hard_next_returns_from_noises
+        )
+        mixed_next_vector_field = (
+            (1.0 - hard_coeff) * soft_next_vector_field
+            + hard_coeff * hard_next_vector_field
+        )
+
+        noisy_returns = (
+            rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_returns
+        )
 
         vector_field1 = self.network.select('critic_flow1')(
             noisy_returns, times, batch['observations'], batch['actions'], params=grad_params
@@ -94,20 +139,6 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         vector_field2 = self.network.select('critic_flow2')(
             noisy_returns, times, batch['observations'], batch['actions'], params=grad_params
         )
-        next_vector_field1 = self.network.select('target_critic_flow1')(
-            noisy_next_returns_bellman, times, batch['next_observations'], next_actions
-        )
-        next_vector_field2 = self.network.select('target_critic_flow2')(
-            noisy_next_returns_bellman, times, batch['next_observations'], next_actions
-        )
-
-        if self.config['ret_agg'] == 'min':
-            mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
-        elif self.config['ret_agg'] == 'mean':
-            mixed_next_vector_field = (next_vector_field1 + next_vector_field2) / 2
-        else:
-            raise ValueError(f"Invalid ret_agg: {self.config['ret_agg']}")
-
         target_vector_field = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field + r_vector_field
         implicit_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
         critic_loss = (weights * implicit_loss).mean()
@@ -139,6 +170,14 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             'q_mean': q.mean(),
             'q_max': q.max(),
             'q_min': q.min(),
+            'hard_coeff_mean': hard_coeff.mean(),
+            'hard_coeff_max': hard_coeff.max(),
+            'disagreement_mean': disagreement.mean(),
+            'disagreement_max': disagreement.max(),
+            'alpha1_mean': alpha1.mean(),
+            'alpha2_mean': alpha2.mean(),
+            'soft_next_return_mean': soft_next_returns_from_noises.mean(),
+            'hard_next_return_mean': hard_next_returns_from_noises.mean(),
         }
 
     def actor_loss(self, batch, grad_params, rng):
@@ -525,6 +564,8 @@ def get_config():
             num_flow_steps=10,
             normalize_q_loss=True,
             confidence_weight_temp=0.3,  # Temperature for the confidence weights.
+            alpha_softmax_temp=2.0,  # Larger -> stronger std-gap effect in alpha softmax.
+            disagreement_softplus_scale=5.0,  # Larger -> faster shift to hard mixing under disagreement.
             alpha=10.0,
             encoder=ml_collections.config_dict.placeholder(str),
         )
