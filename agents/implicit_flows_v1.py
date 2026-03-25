@@ -19,23 +19,6 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
     network: Any
     config: Any = nonpytree_field()
 
-    def compute_addq_path_beta(self, ret_stds1, ret_stds2):
-        """Compute path-level ADDQ conservative mixing weights."""
-        local_std = 0.5 * (ret_stds1 + ret_stds2)
-        batch_std = jax.lax.stop_gradient(jnp.mean(local_std))
-        relative_std = local_std / (batch_std + self.config['addq_eps'])
-
-        conservative_beta = jnp.where(
-            relative_std < self.config['addq_low_threshold'],
-            self.config['addq_beta_low'],
-            jnp.where(
-                relative_std <= self.config['addq_high_threshold'],
-                self.config['addq_beta_mid'],
-                self.config['addq_beta_high'],
-            ),
-        )
-        return local_std, relative_std, conservative_beta
-
     def critic_loss(self, batch, grad_params, rng):
         """Compute implicit critic loss (kept from implicit flows)."""
         batch_size = batch['actions'].shape[0]
@@ -65,33 +48,22 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
         ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
 
-        alpha1 = ret_stds2 / (ret_stds1 + ret_stds2 + 1e-8)
-        alpha2 = ret_stds1 / (ret_stds1 + ret_stds2 + 1e-8)
-
-        conservative_beta = jnp.zeros_like(alpha1)
-        if self.config['ret_agg'] == 'adaptive_addq':
-            _, _, conservative_beta = self.compute_addq_path_beta(ret_stds1, ret_stds2)
-
-        soft_next_returns_from_noises = (
-            alpha1 * noisy_next_returns1 + alpha2 * noisy_next_returns2
-        )
-        hard_next_returns_from_noises = jnp.minimum(
-            noisy_next_returns1, noisy_next_returns2
-        )
+        ret_stds = 0.5 * (ret_stds1 + ret_stds2)
+        if self.config['q_agg'] == 'min':
+            ret_stds = jnp.minimum(ret_stds1, ret_stds2)
+        else:
+            ret_stds = (ret_stds1 + ret_stds2) / 2
+        weights = jax.nn.sigmoid(-self.config['confidence_weight_temp'] / ret_stds) + 0.5
+        weights = jax.lax.stop_gradient(weights)
 
         if self.config['ret_agg'] == 'min':
-            noisy_next_returns_bellman = hard_next_returns_from_noises
+            noisy_next_returns_bellman = jnp.minimum(noisy_next_returns1, noisy_next_returns2)
         elif self.config['ret_agg'] == 'mean':
             noisy_next_returns_bellman = (
                 noisy_next_returns1 + noisy_next_returns2
             ) / 2
-        elif self.config['ret_agg'] == 'adaptive_addq':
-            noisy_next_returns_bellman = (
-                (1.0 - conservative_beta) * soft_next_returns_from_noises
-                + conservative_beta * hard_next_returns_from_noises
-            )
         else:
-            noisy_next_returns_bellman = soft_next_returns_from_noises
+            raise ValueError(f"Invalid ret_agg: {self.config['ret_agg']}")
 
         noises = jax.random.normal(ret_rng, (batch_size, 1))
         r_noises = noises - self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_noises
@@ -112,23 +84,16 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             noisy_next_returns_bellman, times, batch['next_observations'], next_actions
         )
 
-        soft_next_vector_field = alpha1 * next_vector_field1 + alpha2 * next_vector_field2
-        hard_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
         if self.config['ret_agg'] == 'min':
-            mixed_next_vector_field = hard_next_vector_field
+            mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
         elif self.config['ret_agg'] == 'mean':
             mixed_next_vector_field = (next_vector_field1 + next_vector_field2) / 2
-        elif self.config['ret_agg'] == 'adaptive_addq':
-            mixed_next_vector_field = (
-                (1.0 - conservative_beta) * soft_next_vector_field
-                + conservative_beta * hard_next_vector_field
-            )
         else:
-            mixed_next_vector_field = soft_next_vector_field
+            raise ValueError(f"Invalid ret_agg: {self.config['ret_agg']}")
 
         target_vector_field = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field + r_vector_field
         implicit_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
-        critic_loss = implicit_loss.mean()
+        critic_loss = (weights * implicit_loss).mean()
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
         q1 = (q_noises + self.network.select('critic_flow1')(
@@ -542,6 +507,7 @@ def get_config():
             num_samples=16,
             num_flow_steps=10,
             normalize_q_loss=True,
+            confidence_weight_temp=0.3,  # Temperature for the confidence weights.
             alpha=10.0,
             encoder=ml_collections.config_dict.placeholder(str),
         )

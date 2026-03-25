@@ -61,17 +61,17 @@ def drifting_loss(gen: jnp.ndarray, pos: jnp.ndarray, temp: float = 0.05):
     return jnp.mean((gen - target) ** 2)
 
 
-class CDPV1Agent(flax.struct.PyTreeNode):
-    """CDP v1 agent."""
+class CDPV2Agent(flax.struct.PyTreeNode):
+    """CDP v2 agent."""
 
     rng: Any
     network: Any
     config: Any = nonpytree_field()
 
     def critic_loss(self, batch, grad_params, rng):
-        """Compute the TD critic loss with a multi-sample CQL penalty."""
+        """Compute the TD critic loss with uniform-only CQL penalty."""
         batch_size, action_dim = batch['actions'].shape
-        rng, sample_rng, cql_actor_rng, cql_uniform_rng = jax.random.split(rng, 4)
+        rng, sample_rng, cql_uniform_rng = jax.random.split(rng, 3)
         next_actions = self.sample_actions(batch['next_observations'], seed=sample_rng)
         next_actions = jnp.clip(next_actions, -1, 1)
 
@@ -90,13 +90,6 @@ class CDPV1Agent(flax.struct.PyTreeNode):
         obs_repeat = jnp.repeat(batch['observations'][:, None, ...], cql_num_samples, axis=1)
         obs_flat = obs_repeat.reshape((batch_size * cql_num_samples, *batch['observations'].shape[1:]))
 
-        actor_noises = jax.random.normal(cql_actor_rng, (batch_size, cql_num_samples, action_dim))
-        actor_noises_flat = actor_noises.reshape((batch_size * cql_num_samples, action_dim))
-        actor_sampled_actions = self.network.select('actor_onestep_flow')(obs_flat, actor_noises_flat)
-        actor_sampled_actions = jnp.clip(actor_sampled_actions, -1, 1)
-        q_actor_samples = self.network.select('critic')(obs_flat, actions=actor_sampled_actions, params=grad_params)
-        q_actor_samples = q_actor_samples.reshape((q_actor_samples.shape[0], batch_size, cql_num_samples))
-
         uniform_actions = jax.random.uniform(
             cql_uniform_rng, (batch_size, cql_num_samples, action_dim), minval=-1.0, maxval=1.0
         )
@@ -104,8 +97,7 @@ class CDPV1Agent(flax.struct.PyTreeNode):
         q_uniform_samples = self.network.select('critic')(obs_flat, actions=uniform_actions_flat, params=grad_params)
         q_uniform_samples = q_uniform_samples.reshape((q_uniform_samples.shape[0], batch_size, cql_num_samples))
 
-        cql_cat = jnp.concatenate([q_actor_samples, q_uniform_samples], axis=-1)
-        cql_lse = jsp.special.logsumexp(cql_cat / self.config['cql_temp'], axis=-1) * self.config['cql_temp']
+        cql_lse = jsp.special.logsumexp(q_uniform_samples / self.config['cql_temp'], axis=-1) * self.config['cql_temp']
         ood_penalty = self.config['cql_alpha'] * (cql_lse - q_data).mean()
 
         critic_loss = bellman_loss + ood_penalty
@@ -115,18 +107,17 @@ class CDPV1Agent(flax.struct.PyTreeNode):
             'bellman_loss': bellman_loss,
             'ood_penalty': ood_penalty,
             'q_data_mean': q_data.mean(),
-            'q_actor_samples_mean': q_actor_samples.mean(),
             'q_uniform_samples_mean': q_uniform_samples.mean(),
             'cql_lse_mean': cql_lse.mean(),
         }
 
     def actor_loss(self, batch, grad_params, rng):
-        """Compute the drifting-policy actor loss."""
+        """Compute drifting loss with probability-sampled positive actions."""
         batch_size, action_dim = batch['actions'].shape
         num_neg = self.config['num_neg']
         num_pos_samples = self.config['num_samples']
-        pos_topk = min(self.config['pos_topk'], num_pos_samples)
-        rng, noise_rng, pos_rng, mse_rng = jax.random.split(rng, 4)
+        pos_draws = min(self.config['pos_topk'], num_pos_samples + 1)
+        rng, noise_rng, pos_rng, sample_pos_rng, mse_rng = jax.random.split(rng, 5)
 
         # [B, G, D]: generate multiple raw actor actions per state.
         noises = jax.random.normal(noise_rng, (batch_size, num_neg, action_dim))
@@ -139,7 +130,7 @@ class CDPV1Agent(flax.struct.PyTreeNode):
         )
         raw_actor_actions = raw_actions_flat.reshape((batch_size, num_neg, action_dim))
 
-        # Positive samples include dataset action and sampled top-k Q actions.
+        # Build pool = [batch action + sampled actions].
         pos_noises = jax.random.normal(pos_rng, (batch_size, num_pos_samples, action_dim))
         pos_obs_repeat = jnp.repeat(batch['observations'][:, None, ...], num_pos_samples, axis=1)
         pos_obs_flat = pos_obs_repeat.reshape((batch_size * num_pos_samples, *batch['observations'].shape[1:]))
@@ -157,17 +148,34 @@ class CDPV1Agent(flax.struct.PyTreeNode):
         else:
             sampled_pos_q = sampled_pos_qs.mean(axis=0)
         sampled_pos_q = sampled_pos_q.reshape((batch_size, num_pos_samples))
-        _, topk_idx = jax.lax.top_k(sampled_pos_q, pos_topk)  # [B, K]
-        topk_idx_expanded = jnp.expand_dims(topk_idx, axis=-1)  # [B, K, 1]
-        topk_idx_expanded = jnp.repeat(topk_idx_expanded, action_dim, axis=-1)  # [B, K, D]
-        topk_pos_actions = jnp.take_along_axis(sampled_pos_actions, topk_idx_expanded, axis=1)  # [B, K, D]
 
-        pos_actions = jnp.concatenate(
-            [batch['actions'][:, None, :], topk_pos_actions],
-            axis=1,
-        )
+        batch_action_qs = self.network.select('critic')(batch['observations'], actions=batch['actions'])
+        if self.config['q_agg'] == 'min':
+            batch_action_q = batch_action_qs.min(axis=0)
+        else:
+            batch_action_q = batch_action_qs.mean(axis=0)
+
+        pos_pool_actions = jnp.concatenate([batch['actions'][:, None, :], sampled_pos_actions], axis=1)
+        pos_pool_q = jnp.concatenate([batch_action_q[:, None], sampled_pos_q], axis=1)
+        pos_pool_q = jax.lax.stop_gradient(pos_pool_q)
+
+        # Normalize Q into probabilities, then sample positives by weighted probability.
+        q_min = pos_pool_q.min(axis=1, keepdims=True)
+        q_max = pos_pool_q.max(axis=1, keepdims=True)
+        q_norm = (pos_pool_q - q_min) / (q_max - q_min + 1e-8)
+        pos_probs = jax.nn.softmax(q_norm / self.config['pos_prob_temp'], axis=1)
+
+        sample_keys = jax.random.split(sample_pos_rng, batch_size)
+
+        def _sample_indices(k, p):
+            return jax.random.choice(k, a=p.shape[0], shape=(pos_draws,), replace=False, p=p)
+
+        pos_idx = jax.vmap(_sample_indices)(sample_keys, pos_probs)  # [B, K]
+        pos_idx_expanded = jnp.expand_dims(pos_idx, axis=-1)
+        pos_idx_expanded = jnp.repeat(pos_idx_expanded, action_dim, axis=-1)
+        pos_actions = jnp.take_along_axis(pos_pool_actions, pos_idx_expanded, axis=1)
+
         bc_loss = drifting_loss(raw_actor_actions, pos_actions, temp=self.config['drift_temp'])
-
         actor_loss = bc_loss
 
         actions = self.sample_actions(batch['observations'], seed=mse_rng)
@@ -176,8 +184,9 @@ class CDPV1Agent(flax.struct.PyTreeNode):
         return actor_loss, {
             'actor_loss': actor_loss,
             'bc_loss': bc_loss,
-            'pos_q': sampled_pos_q.mean(),
-            'pos_q_topk': jnp.take_along_axis(sampled_pos_q, topk_idx, axis=1).mean(),
+            'pos_q': pos_pool_q.mean(),
+            'pos_q_sampled': jnp.take_along_axis(pos_pool_q, pos_idx, axis=1).mean(),
+            'batch_action_selected_rate': (pos_idx == 0).mean(),
             'mse': mse,
         }
 
@@ -307,7 +316,7 @@ class CDPV1Agent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='cdp_v1',  # Agent name.
+            agent_name='cdp_v2',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
@@ -320,12 +329,13 @@ def get_config():
             tau=0.005,  # Target network update rate.
             q_agg='min',  # Aggregation method for target Q values.\
             cql_alpha=0.1,  # Conservative critic coefficient.
-            cql_temp=5.0,  # Temperature for CQL logsumexp.
-            cql_num_samples=8,  # Number of actor/uniform samples per state for CQL penalty.
-            drift_temp=1,  # Temperature used in drifting BC.
+            cql_temp=100.0,  # Temperature for CQL logsumexp.
+            cql_num_samples=8,  # Number of uniform samples per state for CQL penalty.
+            drift_temp=5,  # Temperature used in drifting BC.
             num_neg=16,  # Number of negative/generated samples per state in actor loss.
             num_samples=16,  # Number of sampled actions used to mine positive actions.
-            pos_topk=2,  # Number of top-Q sampled positives used in drifting loss.
+            pos_topk=2,  # Number of probability-sampled positives used in drifting loss.
+            pos_prob_temp=1.0,  # Temperature for converting normalized Q values to sampling probabilities.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )
