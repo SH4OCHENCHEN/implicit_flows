@@ -129,9 +129,37 @@ class ImplicitFlowsAgent(flax.struct.PyTreeNode):
         else:
             mixed_next_vector_field = soft_next_vector_field
 
+        # Compute return stds for confidence weighting.
+        _, ret_jac_eps_prods1 = self.compute_flow_returns(
+            noises,
+            batch['observations'],
+            batch['actions'],
+            end_times=times,
+            flow_network_name='target_critic_flow1',
+            return_jac_eps_prod=True,
+        )
+        _, ret_jac_eps_prods2 = self.compute_flow_returns(
+            noises,
+            batch['observations'],
+            batch['actions'],
+            end_times=times,
+            flow_network_name='target_critic_flow2',
+            return_jac_eps_prod=True,
+        )
+        ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
+        ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
+
+        ret_stds = 0.5 * (ret_stds1 + ret_stds2)
+        if self.config['q_agg'] == 'min':
+            ret_stds = jnp.minimum(ret_stds1, ret_stds2)
+        else:
+            ret_stds = (ret_stds1 + ret_stds2) / 2
+        weights = jax.nn.sigmoid(-self.config['confidence_weight_temp'] / ret_stds) + 0.5
+        weights = jax.lax.stop_gradient(weights)
+
         target_vector_field = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field + r_vector_field
         implicit_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
-        critic_loss = implicit_loss.mean()
+        critic_loss = (weights * implicit_loss).mean()
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
         q1 = (q_noises + self.network.select('critic_flow1')(
