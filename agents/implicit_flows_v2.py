@@ -96,6 +96,22 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
         next_vector_field2 = self.network.select('target_critic_flow2')(
             mixed_next_returns, times, batch['next_observations'], next_actions
         )
+        # Clip next vector fields:
+        # upper = return_high - gaussian_low, lower = return_low - gaussian_high.
+        next_vector_clip_low = (
+            return_low
+            - gaussian_high
+            - self.config['next_vector_clip_slack']
+        )
+        next_vector_clip_high = (
+            return_high
+            - gaussian_low
+            + self.config['next_vector_clip_slack']
+        )
+        next_vector_clip_high = jnp.maximum(next_vector_clip_high, next_vector_clip_low + 1e-6)
+        next_vector_field1 = jnp.clip(next_vector_field1, next_vector_clip_low, next_vector_clip_high)
+        next_vector_field2 = jnp.clip(next_vector_field2, next_vector_clip_low, next_vector_clip_high)
+
         if self.config['ret_agg'] == 'min':
             mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
         else:
@@ -149,6 +165,8 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
             'next_ret_std_max': ret_stds.max(),
             'next_return_clip_low_mean': clip_low.mean(),
             'next_return_clip_high_mean': clip_high.mean(),
+            'next_vector_clip_low_mean': next_vector_clip_low.mean(),
+            'next_vector_clip_high_mean': next_vector_clip_high.mean(),
             'next_return1_mean': noisy_next_returns1.mean(),
             'next_return2_mean': noisy_next_returns2.mean(),
             'mixed_next_return_mean': mixed_next_returns.mean(),
@@ -552,6 +570,7 @@ def get_config():
             next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
             next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.
             next_return_clip_slack=0.05,  # Relaxation margin for lower/upper clipping bounds.
+            next_vector_clip_slack=0.05,  # Relaxation margin for next-vector-field clipping bounds.
             alpha_softmax_temp=2.0,  # Deprecated/unused (alpha-weighted next-return mixing removed).
             disagreement_softplus_scale=5.0,  # Deprecated/unused (disagreement hard/soft mixing removed).
             alpha=10.0,
