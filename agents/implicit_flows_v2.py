@@ -45,89 +45,61 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
             flow_network_name='target_critic_flow2',
             return_jac_eps_prod=True,
         )
-        ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
-        ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
-        # Softmax over inverse stds: lower-uncertainty branch gets higher weight.
-        alpha_logits = jnp.concatenate(
-            (
-                1.0 / (ret_stds1 + 1e-8),
-                1.0 / (ret_stds2 + 1e-8),
-            ),
-            axis=-1,
+        next_ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
+        next_ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
+
+        # Time-dependent noisy-next-return truncation:
+        # t=0 -> Gaussian 3-sigma interval, t=1 -> return range.
+        gaussian_low = (
+            self.config['next_return_gaussian_mean']
+            - self.config['next_return_clip_sigma'] * self.config['next_return_gaussian_std']
         )
-        alpha_logits = self.config['alpha_softmax_temp'] * alpha_logits
-        alpha = jax.nn.softmax(alpha_logits, axis=-1)
-        alpha1 = alpha[..., :1]
-        alpha2 = alpha[..., 1:2]
-        soft_next_returns_from_noises = alpha1 * noisy_next_returns1 + alpha2 * noisy_next_returns2
-        hard_next_returns_from_noises = jnp.minimum(noisy_next_returns1, noisy_next_returns2)
+        gaussian_high = (
+            self.config['next_return_gaussian_mean']
+            + self.config['next_return_clip_sigma'] * self.config['next_return_gaussian_std']
+        )
+        return_low = self.config['min_reward'] / (1 - self.config['discount'])
+        return_high = self.config['max_reward'] / (1 - self.config['discount'])
+
+        clip_low = times * gaussian_low + (1 - times) * return_low - self.config['next_return_clip_slack']
+        clip_high = times * gaussian_high + (1 - times) * return_high + self.config['next_return_clip_slack']
+        clip_high = jnp.maximum(clip_high, clip_low + 1e-6)
+
+        noisy_next_returns1 = jnp.clip(noisy_next_returns1, clip_low, clip_high)
+        noisy_next_returns2 = jnp.clip(noisy_next_returns2, clip_low, clip_high)
+
+        ret_stds1 = next_ret_stds1
+        ret_stds2 = next_ret_stds2
+
+        # Aggregate next returns with only mean/min (remove alpha-weighted mixing).
+        if self.config['ret_agg'] == 'min':
+            mixed_next_returns = jnp.minimum(noisy_next_returns1, noisy_next_returns2)
+        else:
+            mixed_next_returns = (noisy_next_returns1 + noisy_next_returns2) / 2
 
         noises = jax.random.normal(ret_rng, (batch_size, 1))
         r_noises = noises - self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_noises
         rt = times * jnp.expand_dims(batch['rewards'], axis=-1) + (1 - times) * r_noises
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
 
-        # Compute return stds for confidence weighting.
-        _, ret_jac_eps_prods1 = self.compute_flow_returns(
-            noises,
-            batch['observations'],
-            batch['actions'],
-            end_times=times,
-            flow_network_name='target_critic_flow1',
-            return_jac_eps_prod=True,
-        )
-        _, ret_jac_eps_prods2 = self.compute_flow_returns(
-            noises,
-            batch['observations'],
-            batch['actions'],
-            end_times=times,
-            flow_network_name='target_critic_flow2',
-            return_jac_eps_prod=True,
-        )
-        ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
-        ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
-
-        ret_stds = 0.5 * (ret_stds1 + ret_stds2)
+        # Confidence weights from next-return stds: larger std -> smaller weight.
         if self.config['q_agg'] == 'min':
             ret_stds = jnp.minimum(ret_stds1, ret_stds2)
         else:
             ret_stds = (ret_stds1 + ret_stds2) / 2
-        weights = jax.nn.sigmoid(-self.config['confidence_weight_temp'] / ret_stds) + 0.5
+        weights = 0.5 + 0.5 * jnp.exp(-self.config['confidence_weight_temp'] * ret_stds)
         weights = jax.lax.stop_gradient(weights)
 
-        # Query target vector fields at provisional soft returns for disagreement estimation.
-        provisional_next_returns = soft_next_returns_from_noises
         next_vector_field1 = self.network.select('target_critic_flow1')(
-            provisional_next_returns, times, batch['next_observations'], next_actions
+            mixed_next_returns, times, batch['next_observations'], next_actions
         )
         next_vector_field2 = self.network.select('target_critic_flow2')(
-            provisional_next_returns, times, batch['next_observations'], next_actions
+            mixed_next_returns, times, batch['next_observations'], next_actions
         )
-
-        soft_next_vector_field = alpha1 * next_vector_field1 + alpha2 * next_vector_field2
-        hard_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
-
-        # Disagreement-driven hard/soft coefficient.
-        returns_disagreement = jnp.abs(noisy_next_returns1 - noisy_next_returns2)
-        vectorfield_disagreement = jnp.abs(next_vector_field1 - next_vector_field2)
-        disagreement = returns_disagreement + vectorfield_disagreement
-        # Fixed disagreement mapping: no batch normalization, only local disagreement response.
-        disagreement_response = (
-            jax.nn.softplus(self.config['disagreement_softplus_scale'] * disagreement)
-            - jnp.log(2.0)
-        )
-        disagreement_response = jnp.maximum(disagreement_response, 0.0)
-        hard_coeff = disagreement_response / (1.0 + disagreement_response)
-        hard_coeff = jax.lax.stop_gradient(hard_coeff)
-
-        mixed_next_returns = (
-            (1.0 - hard_coeff) * soft_next_returns_from_noises
-            + hard_coeff * hard_next_returns_from_noises
-        )
-        mixed_next_vector_field = (
-            (1.0 - hard_coeff) * soft_next_vector_field
-            + hard_coeff * hard_next_vector_field
-        )
+        if self.config['ret_agg'] == 'min':
+            mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
+        else:
+            mixed_next_vector_field = (next_vector_field1 + next_vector_field2) / 2
 
         noisy_returns = (
             rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_returns
@@ -170,14 +142,16 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
             'q_mean': q.mean(),
             'q_max': q.max(),
             'q_min': q.min(),
-            'hard_coeff_mean': hard_coeff.mean(),
-            'hard_coeff_max': hard_coeff.max(),
-            'disagreement_mean': disagreement.mean(),
-            'disagreement_max': disagreement.max(),
-            'alpha1_mean': alpha1.mean(),
-            'alpha2_mean': alpha2.mean(),
-            'soft_next_return_mean': soft_next_returns_from_noises.mean(),
-            'hard_next_return_mean': hard_next_returns_from_noises.mean(),
+            'weights_mean': weights.mean(),
+            'weights_min': weights.min(),
+            'weights_max': weights.max(),
+            'next_ret_std_mean': ret_stds.mean(),
+            'next_ret_std_max': ret_stds.max(),
+            'next_return_clip_low_mean': clip_low.mean(),
+            'next_return_clip_high_mean': clip_high.mean(),
+            'next_return1_mean': noisy_next_returns1.mean(),
+            'next_return2_mean': noisy_next_returns2.mean(),
+            'mixed_next_return_mean': mixed_next_returns.mean(),
         }
 
     def actor_loss(self, batch, grad_params, rng):
@@ -560,7 +534,7 @@ def get_config():
             value_layer_norm=True,
             discount=0.99,
             tau=0.005,
-            ret_agg='mean',  # 'min', 'mean', 'adaptive_addq', or soft weighting.
+            ret_agg='mean',  # Next-return aggregation: 'mean' or 'min'.
             q_agg='mean',
             clip_flow_actions=True,
             clip_flow_returns=True,
@@ -574,8 +548,12 @@ def get_config():
             num_flow_steps=10,
             normalize_q_loss=False,
             confidence_weight_temp=0.3,  # Temperature for the confidence weights.
-            alpha_softmax_temp=2.0,  # Larger -> stronger std-gap effect in alpha softmax.
-            disagreement_softplus_scale=5.0,  # Larger -> faster shift to hard mixing under disagreement.
+            next_return_gaussian_mean=0.0,  # Gaussian mean for t=0 next-return clipping anchor.
+            next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
+            next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.
+            next_return_clip_slack=0.05,  # Relaxation margin for lower/upper clipping bounds.
+            alpha_softmax_temp=2.0,  # Deprecated/unused (alpha-weighted next-return mixing removed).
+            disagreement_softplus_scale=5.0,  # Deprecated/unused (disagreement hard/soft mixing removed).
             alpha=10.0,
             encoder=ml_collections.config_dict.placeholder(str),
         )
