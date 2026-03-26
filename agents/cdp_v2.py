@@ -4,7 +4,6 @@ from typing import Any
 import flax
 import jax
 import jax.numpy as jnp
-import jax.scipy as jsp
 import ml_collections
 import optax
 
@@ -69,9 +68,8 @@ class CDPV2Agent(flax.struct.PyTreeNode):
     config: Any = nonpytree_field()
 
     def critic_loss(self, batch, grad_params, rng):
-        """Compute the TD critic loss with uniform-only CQL penalty."""
-        batch_size, action_dim = batch['actions'].shape
-        rng, sample_rng, cql_uniform_rng = jax.random.split(rng, 3)
+        """Compute the TD critic loss (FQL-style, without CQL)."""
+        rng, sample_rng = jax.random.split(rng)
         next_actions = self.sample_actions(batch['next_observations'], seed=sample_rng)
         next_actions = jnp.clip(next_actions, -1, 1)
 
@@ -86,33 +84,18 @@ class CDPV2Agent(flax.struct.PyTreeNode):
         q_data = self.network.select('critic')(batch['observations'], actions=batch['actions'], params=grad_params)
         bellman_loss = jnp.square(q_data - target_q).mean()
 
-        cql_num_samples = self.config['cql_num_samples']
-        obs_repeat = jnp.repeat(batch['observations'][:, None, ...], cql_num_samples, axis=1)
-        obs_flat = obs_repeat.reshape((batch_size * cql_num_samples, *batch['observations'].shape[1:]))
-
-        uniform_actions = jax.random.uniform(
-            cql_uniform_rng, (batch_size, cql_num_samples, action_dim), minval=-1.0, maxval=1.0
-        )
-        uniform_actions_flat = uniform_actions.reshape((batch_size * cql_num_samples, action_dim))
-        q_uniform_samples = self.network.select('critic')(obs_flat, actions=uniform_actions_flat, params=grad_params)
-        q_uniform_samples = q_uniform_samples.reshape((q_uniform_samples.shape[0], batch_size, cql_num_samples))
-
-        cql_lse = jsp.special.logsumexp(q_uniform_samples / self.config['cql_temp'], axis=-1) * self.config['cql_temp']
-        ood_penalty = self.config['cql_alpha'] * (cql_lse - q_data).mean()
-
-        critic_loss = bellman_loss + ood_penalty
+        critic_loss = bellman_loss
 
         return critic_loss, {
             'critic_loss': critic_loss,
             'bellman_loss': bellman_loss,
-            'ood_penalty': ood_penalty,
             'q_data_mean': q_data.mean(),
-            'q_uniform_samples_mean': q_uniform_samples.mean(),
-            'cql_lse_mean': cql_lse.mean(),
+            'q_data_max': q_data.max(),
+            'q_data_min': q_data.min(),
         }
 
     def actor_loss(self, batch, grad_params, rng):
-        """Compute drifting loss with probability-sampled positive actions."""
+        """Compute weighted drifting losses from batch-only and probability positives."""
         batch_size, action_dim = batch['actions'].shape
         num_neg = self.config['num_neg']
         num_pos_samples = self.config['num_samples']
@@ -175,15 +158,25 @@ class CDPV2Agent(flax.struct.PyTreeNode):
         pos_idx_expanded = jnp.repeat(pos_idx_expanded, action_dim, axis=-1)
         pos_actions = jnp.take_along_axis(pos_pool_actions, pos_idx_expanded, axis=1)
 
-        bc_loss = drifting_loss(raw_actor_actions, pos_actions, temp=self.config['drift_temp'])
-        actor_loss = bc_loss
+        drift_prob_loss = drifting_loss(raw_actor_actions, pos_actions, temp=self.config['drift_temp'])
+        drift_batch_loss = drifting_loss(
+            raw_actor_actions,
+            batch['actions'][:, None, :],
+            temp=self.config['drift_temp'],
+        )
+        actor_loss = (
+            self.config['drift_batch_weight'] * drift_batch_loss
+            + self.config['drift_prob_weight'] * drift_prob_loss
+        )
 
         actions = self.sample_actions(batch['observations'], seed=mse_rng)
         mse = jnp.mean((actions - batch['actions']) ** 2)
 
         return actor_loss, {
             'actor_loss': actor_loss,
-            'bc_loss': bc_loss,
+            'bc_loss': drift_prob_loss,
+            'drift_prob_loss': drift_prob_loss,
+            'drift_batch_loss': drift_batch_loss,
             'pos_q': pos_pool_q.mean(),
             'pos_q_sampled': jnp.take_along_axis(pos_pool_q, pos_idx, axis=1).mean(),
             'batch_action_selected_rate': (pos_idx == 0).mean(),
@@ -328,10 +321,12 @@ def get_config():
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
             q_agg='min',  # Aggregation method for target Q values.\
-            cql_alpha=0.1,  # Conservative critic coefficient.
-            cql_temp=100.0,  # Temperature for CQL logsumexp.
-            cql_num_samples=8,  # Number of uniform samples per state for CQL penalty.
+            cql_alpha=0.1,  # Deprecated/unused in cdp_v2 critic (kept for CLI compatibility).
+            cql_temp=100.0,  # Deprecated/unused in cdp_v2 critic (kept for CLI compatibility).
+            cql_num_samples=8,  # Deprecated/unused in cdp_v2 critic (kept for CLI compatibility).
             drift_temp=5,  # Temperature used in drifting BC.
+            drift_batch_weight=1.0,  # Weight of batch-action-only drifting loss.
+            drift_prob_weight=1.0,  # Weight of probability-mined drifting loss.
             num_neg=16,  # Number of negative/generated samples per state in actor loss.
             num_samples=16,  # Number of sampled actions used to mine positive actions.
             pos_topk=2,  # Number of probability-sampled positives used in drifting loss.
