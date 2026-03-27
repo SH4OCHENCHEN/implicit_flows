@@ -130,7 +130,7 @@ class CDPV3Agent(flax.struct.PyTreeNode):
             num_policy_neg_behavior = max(1, min(num_neg - 1, num_policy_neg_behavior))
             num_policy_neg_raw = num_neg - num_policy_neg_behavior
 
-        rng, behavior_noise_rng, policy_noise_rng, pos_rng, sample_pos_rng, behavior_neg_rng, mse_rng = jax.random.split(rng, 7)
+        rng, behavior_noise_rng, policy_x_noise_rng, policy_neg_raw_noise_rng, pos_rng, sample_pos_rng, behavior_neg_rng, mse_rng = jax.random.split(rng, 8)
 
         # =========================
         # 1) Behavior actor loss:
@@ -158,10 +158,10 @@ class CDPV3Agent(flax.struct.PyTreeNode):
         # 2) Policy actor loss:
         # positives are sampled from behavior-generated candidates by exp(Q) probabilities
         # =========================
-        policy_noises = jax.random.normal(policy_noise_rng, (batch_size, num_neg, action_dim))
-        policy_noises_flat = policy_noises.reshape((batch_size * num_neg, action_dim))
+        policy_x_noises = jax.random.normal(policy_x_noise_rng, (batch_size, num_neg, action_dim))
+        policy_x_noises_flat = policy_x_noises.reshape((batch_size * num_neg, action_dim))
         raw_policy_actions_flat = self.network.select('actor_onestep_flow')(
-            obs_flat, policy_noises_flat, params=grad_params
+            obs_flat, policy_x_noises_flat, params=grad_params
         )
         raw_policy_actions = raw_policy_actions_flat.reshape((batch_size, num_neg, action_dim))
 
@@ -204,8 +204,27 @@ class CDPV3Agent(flax.struct.PyTreeNode):
         pos_idx_expanded = jnp.repeat(pos_idx_expanded, action_dim, axis=-1)
         policy_pos_actions = jnp.take_along_axis(behavior_pos_actions, pos_idx_expanded, axis=1)
 
-        # Policy negatives mix raw policy actions and behavior-generated actions.
-        raw_policy_neg_actions = raw_policy_actions[:, :num_policy_neg_raw, :]
+        # Policy negatives mix raw-policy samples and behavior-generated samples.
+        policy_neg_raw_noises = jax.random.normal(
+            policy_neg_raw_noise_rng, (batch_size, num_policy_neg_raw, action_dim)
+        )
+        policy_neg_raw_obs_repeat = jnp.repeat(
+            batch['observations'][:, None, ...], num_policy_neg_raw, axis=1
+        )
+        policy_neg_raw_obs_flat = policy_neg_raw_obs_repeat.reshape(
+            (batch_size * num_policy_neg_raw, *batch['observations'].shape[1:])
+        )
+        policy_neg_raw_noises_flat = policy_neg_raw_noises.reshape(
+            (batch_size * num_policy_neg_raw, action_dim)
+        )
+        raw_policy_neg_actions_flat = self.network.select('actor_onestep_flow')(
+            policy_neg_raw_obs_flat, policy_neg_raw_noises_flat, params=grad_params
+        )
+        raw_policy_neg_actions_flat = jnp.clip(raw_policy_neg_actions_flat, -1, 1)
+        raw_policy_neg_actions = raw_policy_neg_actions_flat.reshape(
+            (batch_size, num_policy_neg_raw, action_dim)
+        )
+
         if num_policy_neg_behavior > 0:
             behavior_neg_noises = jax.random.normal(
                 behavior_neg_rng, (batch_size, num_policy_neg_behavior, action_dim)
