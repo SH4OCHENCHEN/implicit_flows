@@ -374,13 +374,13 @@ def get_config():
             cql_alpha=0.1,  # Deprecated/unused in cdp_v2 critic (kept for CLI compatibility).
             cql_temp=100.0,  # Deprecated/unused in cdp_v2 critic (kept for CLI compatibility).
             cql_num_samples=8,  # Deprecated/unused in cdp_v2 critic (kept for CLI compatibility).
-            drift_temp=0.1,  # Temperature used in drifting BC.
+            drift_temp=0.05,  # Temperature used in drifting BC.
             drift_batch_weight=1.0,  # Weight of behavior-actor drifting loss (single dataset positive).
             drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (sampled behavior positives).
             num_neg=16,  # Number of negative/generated samples per state (same for both actors).
             num_samples=16,  # Number of behavior-actor candidate positives for policy actor.
             pos_topk=2,  # Number of sampled positives drawn from exp(Q) distribution.
-            pos_prob_temp=0.01,  # Temperature for exp(Q) sampling probabilities.
+            pos_prob_temp=0.001,  # Temperature for exp(Q) sampling probabilities.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )
