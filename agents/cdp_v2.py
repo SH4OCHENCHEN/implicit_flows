@@ -372,7 +372,7 @@ def get_config():
             num_neg=16,  # Number of negative/generated samples per state (same for both actors).
             num_samples=16,  # Number of behavior-actor candidate positives for policy actor.
             pos_topk=2,  # Number of sampled positives drawn from exp(Q) distribution.
-            pos_prob_temp=0.1,  # Temperature for exp(Q) sampling probabilities.
+            pos_prob_temp=0.01,  # Temperature for exp(Q) sampling probabilities.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )
