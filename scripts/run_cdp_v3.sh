@@ -46,8 +46,7 @@ for seed in "${SEED_LIST[@]}"; do
       run_exp "cdp_v3-scene-${task_id}-seed${seed}" \
         --seed="${seed}" \
         --env_name="scene-play-singletask-${task_id}-v0" \
-        --agent=agents/cdp_v3.py \
-        --agent.ret_agg=min || true
+        --agent=agents/cdp_v3.py || true
 
       run_exp "cdp_v3-cube-double-${task_id}-seed${seed}" \
         --seed="${seed}" \
