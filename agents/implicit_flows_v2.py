@@ -165,8 +165,6 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
             'next_ret_std_max': ret_stds.max(),
             'next_return_clip_low_mean': clip_low.mean(),
             'next_return_clip_high_mean': clip_high.mean(),
-            'next_vector_clip_low_mean': next_vector_clip_low.mean(),
-            'next_vector_clip_high_mean': next_vector_clip_high.mean(),
             'next_return1_mean': noisy_next_returns1.mean(),
             'next_return2_mean': noisy_next_returns2.mean(),
             'mixed_next_return_mean': mixed_next_returns.mean(),
