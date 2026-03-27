@@ -16,52 +16,68 @@ from utils.networks import ActorVectorField, Value
 # Core: Compute Drift V and Loss
 # ============================================================
 
-def compute_drift(gen: jnp.ndarray, pos: jnp.ndarray, temp: float = 0.05):
-    """Compute drift field V with attention-based kernel.
+def compute_drift(
+    gen: jnp.ndarray,
+    pos: jnp.ndarray,
+    neg: jnp.ndarray,
+    temp: float = 0.05,
+    exclude_self_neg: bool = False,
+):
+    """Compute drift field V with explicit positive and negative sets.
 
     Args:
         gen: Generated samples [..., G, D]
-        pos: Data samples [..., P, D]
+        pos: Positive samples [..., P, D]
+        neg: Negative samples [..., N, D]
         temp: Temperature for softmax kernel.
+        exclude_self_neg: Whether to mask diagonal in gen-neg distances.
 
     Returns:
         V: Drift vectors [..., G, D]
     """
-    targets = jnp.concatenate([gen, pos], axis=-2)  # [..., G+P, D]
-    g = gen.shape[-2]
+    dist_pos = jnp.linalg.norm(gen[..., :, None, :] - pos[..., None, :, :], axis=-1)  # [..., G, P]
+    dist_neg = jnp.linalg.norm(gen[..., :, None, :] - neg[..., None, :, :], axis=-1)  # [..., G, N]
 
-    diff = gen[..., :, None, :] - targets[..., None, :, :]  # [..., G, G+P, D]
-    dist = jnp.linalg.norm(diff, axis=-1)  # [..., G, G+P]
+    if exclude_self_neg:
+        g = gen.shape[-2]
+        n = neg.shape[-2]
+        dist_neg = dist_neg + jnp.eye(g, n, dtype=dist_neg.dtype) * 1e6
 
-    large_eye = jnp.eye(g, dtype=dist.dtype) * 1e6
-    dist = dist.at[..., :, :g].add(large_eye)
+    logits_pos = -dist_pos / temp
+    logits_neg = -dist_neg / temp
+    logits = jnp.concatenate([logits_pos, logits_neg], axis=-1)  # [..., G, P+N]
 
-    # Dimension-adaptive temperature: scale by sqrt(action_dim).
-    action_dim = gen.shape[-1]
-    adaptive_temp = temp * jnp.sqrt(jnp.asarray(action_dim, dtype=dist.dtype))
-    kernel = jnp.exp(-dist / adaptive_temp)
+    a_row = jax.nn.softmax(logits, axis=-1)
+    a_col = jax.nn.softmax(logits, axis=-2)
+    a = jnp.sqrt(jnp.clip(a_row * a_col, a_min=1e-12))
 
-    normalizer = kernel.sum(axis=-1, keepdims=True) * kernel.sum(axis=-2, keepdims=True)
-    normalizer = jnp.sqrt(jnp.clip(normalizer, a_min=1e-12))
-    normalized_kernel = kernel / normalizer
+    p = pos.shape[-2]
+    a_pos = a[..., :p]
+    a_neg = a[..., p:]
 
-    pos_coeff = normalized_kernel[..., :, g:] * normalized_kernel[..., :, :g].sum(axis=-1, keepdims=True)
-    pos_v = pos_coeff @ targets[..., g:, :]
-    neg_coeff = normalized_kernel[..., :, :g] * normalized_kernel[..., :, g:].sum(axis=-1, keepdims=True)
-    neg_v = neg_coeff @ targets[..., :g, :]
+    w_pos = a_pos * a_neg.sum(axis=-1, keepdims=True)
+    w_neg = a_neg * a_pos.sum(axis=-1, keepdims=True)
 
-    return pos_v - neg_v
+    drift_pos = w_pos @ pos
+    drift_neg = w_neg @ neg
+    return drift_pos - drift_neg
 
 
-def drifting_loss(gen: jnp.ndarray, pos: jnp.ndarray, temp: float = 0.05):
+def drifting_loss(
+    gen: jnp.ndarray,
+    pos: jnp.ndarray,
+    neg: jnp.ndarray,
+    temp: float = 0.05,
+    exclude_self_neg: bool = False,
+):
     """Drifting loss: MSE(gen, stopgrad(gen + V))."""
-    v = compute_drift(gen, pos, temp=temp)
+    v = compute_drift(gen, pos, neg, temp=temp, exclude_self_neg=exclude_self_neg)
     target = jax.lax.stop_gradient(gen + v)
     return jnp.mean((gen - target) ** 2)
 
 
-class CDPV2Agent(flax.struct.PyTreeNode):
-    """CDP v2 agent."""
+class CDPV3Agent(flax.struct.PyTreeNode):
+    """CDP v3 agent with explicit positive/negative drift sets."""
 
     rng: Any
     network: Any
@@ -101,7 +117,20 @@ class CDPV2Agent(flax.struct.PyTreeNode):
         num_neg = self.config['num_neg']
         num_pos_samples = self.config['num_samples']
         pos_draws = min(self.config['pos_topk'], num_pos_samples)
-        rng, behavior_noise_rng, policy_noise_rng, pos_rng, sample_pos_rng, mse_rng = jax.random.split(rng, 6)
+
+        raw_neg_ratio = float(self.config['policy_neg_raw_ratio'])
+        behavior_neg_ratio = float(self.config['policy_neg_behavior_ratio'])
+        if num_neg <= 1 or behavior_neg_ratio <= 0:
+            num_policy_neg_behavior = 0
+            num_policy_neg_raw = num_neg
+        else:
+            num_policy_neg_behavior = int(
+                round(num_neg * behavior_neg_ratio / (raw_neg_ratio + behavior_neg_ratio))
+            )
+            num_policy_neg_behavior = max(1, min(num_neg - 1, num_policy_neg_behavior))
+            num_policy_neg_raw = num_neg - num_policy_neg_behavior
+
+        rng, behavior_noise_rng, policy_noise_rng, pos_rng, sample_pos_rng, behavior_neg_rng, mse_rng = jax.random.split(rng, 7)
 
         # =========================
         # 1) Behavior actor loss:
@@ -120,7 +149,9 @@ class CDPV2Agent(flax.struct.PyTreeNode):
         behavior_drift_loss = drifting_loss(
             raw_behavior_actions,
             behavior_pos_actions,
+            raw_behavior_actions,
             temp=self.config['drift_temp'],
+            exclude_self_neg=True,
         )
 
         # =========================
@@ -141,7 +172,7 @@ class CDPV2Agent(flax.struct.PyTreeNode):
         pos_noises_flat = pos_noises.reshape((batch_size * num_pos_samples, action_dim))
 
         behavior_pos_actions_flat = self.network.select('actor_behavior_onestep_flow')(
-            pos_obs_flat, pos_noises_flat
+            pos_obs_flat, pos_noises_flat, params=grad_params
         )
         behavior_pos_actions_flat = jnp.clip(behavior_pos_actions_flat, -1, 1)
         behavior_pos_actions = behavior_pos_actions_flat.reshape((batch_size, num_pos_samples, action_dim))
@@ -172,9 +203,39 @@ class CDPV2Agent(flax.struct.PyTreeNode):
         pos_idx_expanded = jnp.expand_dims(pos_idx, axis=-1)
         pos_idx_expanded = jnp.repeat(pos_idx_expanded, action_dim, axis=-1)
         policy_pos_actions = jnp.take_along_axis(behavior_pos_actions, pos_idx_expanded, axis=1)
+
+        # Policy negatives mix raw policy actions and behavior-generated actions.
+        raw_policy_neg_actions = raw_policy_actions[:, :num_policy_neg_raw, :]
+        if num_policy_neg_behavior > 0:
+            behavior_neg_noises = jax.random.normal(
+                behavior_neg_rng, (batch_size, num_policy_neg_behavior, action_dim)
+            )
+            behavior_neg_obs_repeat = jnp.repeat(
+                batch['observations'][:, None, ...], num_policy_neg_behavior, axis=1
+            )
+            behavior_neg_obs_flat = behavior_neg_obs_repeat.reshape(
+                (batch_size * num_policy_neg_behavior, *batch['observations'].shape[1:])
+            )
+            behavior_neg_noises_flat = behavior_neg_noises.reshape(
+                (batch_size * num_policy_neg_behavior, action_dim)
+            )
+            behavior_neg_actions_flat = self.network.select('actor_behavior_onestep_flow')(
+                behavior_neg_obs_flat, behavior_neg_noises_flat, params=grad_params
+            )
+            behavior_neg_actions_flat = jnp.clip(behavior_neg_actions_flat, -1, 1)
+            behavior_neg_actions = behavior_neg_actions_flat.reshape(
+                (batch_size, num_policy_neg_behavior, action_dim)
+            )
+            policy_neg_actions = jnp.concatenate(
+                [raw_policy_neg_actions, behavior_neg_actions], axis=1
+            )
+        else:
+            policy_neg_actions = raw_policy_neg_actions
+
         policy_drift_loss = drifting_loss(
             raw_policy_actions,
             policy_pos_actions,
+            policy_neg_actions,
             temp=self.config['drift_temp'],
         )
 
@@ -201,6 +262,8 @@ class CDPV2Agent(flax.struct.PyTreeNode):
             'lam_mean': lam.mean(),
             'lam_min': lam.min(),
             'lam_max': lam.max(),
+            'policy_neg_raw_count': jnp.asarray(num_policy_neg_raw),
+            'policy_neg_behavior_count': jnp.asarray(num_policy_neg_behavior),
             'pos_entropy': (-pos_probs * jnp.log(pos_probs + 1e-12)).sum(axis=1).mean(),
             'mse': mse,
         }
@@ -359,7 +422,7 @@ class CDPV2Agent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='cdp_v2',  # Agent name.
+            agent_name='cdp_v3',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
@@ -381,6 +444,8 @@ def get_config():
             num_samples=16,  # Number of behavior-actor candidate positives for policy actor.
             pos_topk=2,  # Number of sampled positives drawn from exp(Q) distribution.
             pos_prob_temp=0.01,  # Temperature for exp(Q) sampling probabilities.
+            policy_neg_raw_ratio=4.0,  # Policy-neg mix ratio numerator for raw policy actions.
+            policy_neg_behavior_ratio=1.0,  # Policy-neg mix ratio numerator for behavior actions.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )

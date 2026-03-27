@@ -20,5 +20,7 @@ implicit_flows_v1_result/
 cdp_eval_result/
 cdpv1_results/
 cdpv2_results/
+cdpv3_results/
+cdpv3_result/
 
 implicit_flows_v2_result/
