@@ -87,7 +87,7 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
             ret_stds = jnp.minimum(ret_stds1, ret_stds2)
         else:
             ret_stds = (ret_stds1 + ret_stds2) / 2
-        weights = 0.5 + 0.5 * jnp.exp(-self.config['confidence_weight_temp'] * ret_stds)
+        weights = 0.5 + jax.nn.sigmoid(-self.config['confidence_weight_temp'] * ret_stds)
         weights = jax.lax.stop_gradient(weights)
 
         next_vector_field1 = self.network.select('target_critic_flow1')(
