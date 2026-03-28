@@ -43,24 +43,17 @@ run_exp() {
 for seed in "${SEED_LIST[@]}"; do
   if [[ "$RUN_OGBENCH" == "1" ]]; then
     for task_id in "${TASK_IDS[@]}"; do
-      run_exp "cdp_v3-scene-${task_id}-seed${seed}" \
-        --seed="${seed}" \
-        --env_name="scene-play-singletask-${task_id}-v0" \
-        --agent=agents/cdp_v3.py || true
-
       run_exp "cdp_v3-cube-double-${task_id}-seed${seed}" \
         --seed="${seed}" \
         --env_name="cube-double-play-singletask-${task_id}-v0" \
         --agent=agents/cdp_v3.py \
-        --agent.discount=0.995 \
-        --agent.cql_alpha=1.0 || true
+        --agent.discount=0.995 || true
 
       run_exp "cdp_v3-cube-triple-${task_id}-seed${seed}" \
         --seed="${seed}" \
         --env_name="cube-triple-play-singletask-${task_id}-v0" \
         --agent=agents/cdp_v3.py \
-        --agent.discount=0.995 \
-        --agent.cql_alpha=1.0 || true
+        --agent.discount=0.995 || true
     done
   fi
 
@@ -69,29 +62,25 @@ for seed in "${SEED_LIST[@]}"; do
       --seed="${seed}" \
       --env_name=pen-cloned-v1 \
       --agent=agents/cdp_v3.py \
-      --agent.q_agg=min \
-      --agent.cql_alpha=1.0 || true
+      --agent.q_agg=min || true
 
     run_exp "cdp_v3-door-cloned-seed${seed}" \
       --seed="${seed}" \
       --env_name=door-cloned-v1 \
       --agent=agents/cdp_v3.py \
-      --agent.q_agg=min \
-      --agent.cql_alpha=1.0 || true
+      --agent.q_agg=min || true
 
     run_exp "cdp_v3-hammer-cloned-seed${seed}" \
       --seed="${seed}" \
       --env_name=hammer-cloned-v1 \
       --agent=agents/cdp_v3.py \
-      --agent.q_agg=min \
-      --agent.cql_alpha=1.0 || true
+      --agent.q_agg=min || true
 
     run_exp "cdp_v3-relocate-cloned-seed${seed}" \
       --seed="${seed}" \
       --env_name=relocate-cloned-v1 \
       --agent=agents/cdp_v3.py \
-      --agent.q_agg=min \
-      --agent.cql_alpha=1.0 || true
+      --agent.q_agg=min || true
   fi
 
   if [[ "$RUN_ONLINE" == "1" ]]; then
@@ -100,8 +89,7 @@ for seed in "${SEED_LIST[@]}"; do
       --env_name=antmaze-large-navigate-singletask-task1-v0 \
       --online_steps=1000000 \
       --agent=agents/cdp_v3.py \
-      --agent.q_agg=min \
-      --agent.cql_alpha=1.0 || true
+      --agent.q_agg=min || true
   fi
 done
 
