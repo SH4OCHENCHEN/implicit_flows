@@ -453,10 +453,7 @@ def get_config():
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
             q_agg='min',  # Aggregation method for target Q values.\
-            cql_alpha=0.1,  # Deprecated/unused in cdp_v2 critic (kept for CLI compatibility).
-            cql_temp=100.0,  # Deprecated/unused in cdp_v2 critic (kept for CLI compatibility).
-            cql_num_samples=8,  # Deprecated/unused in cdp_v2 critic (kept for CLI compatibility).
-            drift_temp=10,  # Temperature used in drifting BC.
+            drift_temp=0.01,  # Temperature used in drifting BC.
             drift_batch_weight=1.0,  # Weight of behavior-actor drifting loss (single dataset positive).
             drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (sampled behavior positives).
             num_neg=16,  # Number of negative/generated samples per state (same for both actors).
