@@ -87,7 +87,7 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
             ret_stds = jnp.minimum(ret_stds1, ret_stds2)
         else:
             ret_stds = (ret_stds1 + ret_stds2) / 2
-        weights = 0.5 + 0.5 * jnp.exp(-self.config['confidence_weight_temp'] * ret_stds)
+        weights = 0.5 + jax.nn.sigmoid(-self.config['confidence_weight_temp'] * ret_stds)
         weights = jax.lax.stop_gradient(weights)
 
         next_vector_field1 = self.network.select('target_critic_flow1')(
@@ -563,7 +563,7 @@ def get_config():
             num_samples=16,
             num_flow_steps=10,
             normalize_q_loss=False,
-            confidence_weight_temp=0.3,  # Temperature for the confidence weights.
+            confidence_weight_temp=3,  # Temperature for the confidence weights.
             next_return_gaussian_mean=0.0,  # Gaussian mean for t=0 next-return clipping anchor.
             next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
             next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.
