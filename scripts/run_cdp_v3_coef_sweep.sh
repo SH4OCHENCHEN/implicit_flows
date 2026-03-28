@@ -8,9 +8,10 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 SAVE_ROOT="${SAVE_ROOT:-cdpv3_coef_sweep_results}"
 SEEDS_STR="${SEEDS:-0}"
 TASK_IDS_STR="${TASK_IDS:-task1}"
+OFFLINE_STEPS="${OFFLINE_STEPS:-400000}"
 
 # Grid search ranges (can be overridden by env vars).
-DRIFT_TEMPS_STR="${DRIFT_TEMPS:-0.1 10 50}"
+DRIFT_TEMPS_STR="${DRIFT_TEMPS:-0.01 10 50}"
 POS_PROB_TEMPS_STR="${POS_PROB_TEMPS:-0.0001 0.01 1}"
 
 IFS=' ' read -r -a SEED_LIST <<< "$SEEDS_STR"
@@ -51,6 +52,7 @@ for seed in "${SEED_LIST[@]}"; do
           --seed="${seed}" \
           --env_name="cube-double-play-singletask-${task_id}-v0" \
           --agent=agents/cdp_v3.py \
+          --offline_steps="${OFFLINE_STEPS}" \
           --agent.discount=0.995 \
           --agent.drift_temp="${drift_temp}" \
           --agent.pos_prob_temp="${pos_prob_temp}" || true
