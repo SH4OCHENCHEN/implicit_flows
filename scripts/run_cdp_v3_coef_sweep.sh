@@ -11,8 +11,8 @@ TASK_IDS_STR="${TASK_IDS:-task1}"
 OFFLINE_STEPS="${OFFLINE_STEPS:-400000}"
 
 # Grid search ranges (can be overridden by env vars).
-DRIFT_TEMPS_STR="${DRIFT_TEMPS:-0.01 10 50}"
-POS_PROB_TEMPS_STR="${POS_PROB_TEMPS:-0.0001 0.01 1}"
+DRIFT_TEMPS_STR="${DRIFT_TEMPS:-1 5 20}"
+POS_PROB_TEMPS_STR="${POS_PROB_TEMPS:-0.1 3 5 10}"
 
 IFS=' ' read -r -a SEED_LIST <<< "$SEEDS_STR"
 IFS=' ' read -r -a TASK_IDS <<< "$TASK_IDS_STR"
