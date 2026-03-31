@@ -563,7 +563,7 @@ def get_config():
             num_samples=16,
             num_flow_steps=10,
             normalize_q_loss=False,
-            confidence_weight_temp=3,  # Temperature for the confidence weights.
+            confidence_weight_temp=50,  # Temperature for the confidence weights.
             next_return_gaussian_mean=0.0,  # Gaussian mean for t=0 next-return clipping anchor.
             next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
             next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.

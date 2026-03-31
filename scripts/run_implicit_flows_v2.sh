@@ -6,11 +6,11 @@ cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 SAVE_ROOT="${SAVE_ROOT:-implicit_flows_v2_result}"
-SEEDS_STR="${SEEDS:-0}"
-TASK_IDS_STR="${TASK_IDS:-task1}"
+SEEDS_STR="${SEEDS:-1}"
+TASK_IDS_STR="${TASK_IDS:-task1 task2 task3 task4 task5}"
 RUN_OGBENCH="${RUN_OGBENCH:-1}"
-RUN_D4RL="${RUN_D4RL:-0}"
-RUN_ONLINE="${RUN_ONLINE:-0}"
+RUN_D4RL="${RUN_D4RL:-1}"
+RUN_ONLINE="${RUN_ONLINE:-1}"
 
 IFS=' ' read -r -a SEED_LIST <<< "$SEEDS_STR"
 IFS=' ' read -r -a TASK_IDS <<< "$TASK_IDS_STR"
@@ -43,12 +43,6 @@ run_exp() {
 for seed in "${SEED_LIST[@]}"; do
   if [[ "$RUN_OGBENCH" == "1" ]]; then
     for task_id in "${TASK_IDS[@]}"; do
-      run_exp "implicit_flows_v2-scene-${task_id}-seed${seed}" \
-        --seed="${seed}" \
-        --env_name="scene-play-singletask-${task_id}-v0" \
-        --agent=agents/implicit_flows_v2.py \
-        --agent.ret_agg=min || true
-
       run_exp "implicit_flows_v2-cube-double-${task_id}-seed${seed}" \
         --seed="${seed}" \
         --env_name="cube-double-play-singletask-${task_id}-v0" \
@@ -60,13 +54,51 @@ for seed in "${SEED_LIST[@]}"; do
         --env_name="cube-triple-play-singletask-${task_id}-v0" \
         --agent=agents/implicit_flows_v2.py \
         --agent.discount=0.995 || true
+
+      run_exp "implicit_flows_v2-puzzle3-${task_id}-seed${seed}" \
+        --seed="${seed}" \
+        --env_name="puzzle-3x3-play-singletask-${task_id}-v0" \
+        --agent=agents/implicit_flows_v2.py \
+        --agent.ret_agg=min || true
+
+      run_exp "implicit_flows_v2-puzzle4-${task_id}-seed${seed}" \
+        --seed="${seed}" \
+        --env_name="puzzle-4x4-play-singletask-${task_id}-v0" \
+        --agent=agents/implicit_flows_v2.py \
+        --agent.confidence_weight_temp=100 \
+        --agent.q_agg=min || true
+
+      run_exp "implicit_flows_v2-scene-${task_id}-seed${seed}" \
+        --seed="${seed}" \
+        --env_name="scene-play-singletask-${task_id}-v0" \
+        --agent=agents/implicit_flows_v2.py \
+        --agent.ret_agg=min || true
     done
   fi
 
   if [[ "$RUN_D4RL" == "1" ]]; then
+    run_exp "implicit_flows_v2-pen-human-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=pen-human-v1 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.ret_agg=min \
+      --agent.q_agg=min || true
+
     run_exp "implicit_flows_v2-pen-cloned-seed${seed}" \
       --seed="${seed}" \
       --env_name=pen-cloned-v1 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.q_agg=min || true
+
+    run_exp "implicit_flows_v2-pen-expert-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=pen-expert-v1 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.q_agg=min || true
+
+    run_exp "implicit_flows_v2-door-human-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=door-human-v1 \
       --agent=agents/implicit_flows_v2.py \
       --agent.q_agg=min || true
 
@@ -77,16 +109,50 @@ for seed in "${SEED_LIST[@]}"; do
       --agent.ret_agg=min \
       --agent.q_agg=min || true
 
+    run_exp "implicit_flows_v2-door-expert-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=door-expert-v1 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.ret_agg=min \
+      --agent.q_agg=min || true
+
+    run_exp "implicit_flows_v2-hammer-human-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=hammer-human-v1 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.q_agg=min || true
+
     run_exp "implicit_flows_v2-hammer-cloned-seed${seed}" \
       --seed="${seed}" \
       --env_name=hammer-cloned-v1 \
       --agent=agents/implicit_flows_v2.py \
       --agent.q_agg=min || true
 
+    run_exp "implicit_flows_v2-hammer-expert-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=hammer-expert-v1 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.ret_agg=min \
+      --agent.q_agg=min || true
+
+    run_exp "implicit_flows_v2-relocate-human-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=relocate-human-v1 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.ret_agg=min \
+      --agent.q_agg=min || true
+
     run_exp "implicit_flows_v2-relocate-cloned-seed${seed}" \
       --seed="${seed}" \
       --env_name=relocate-cloned-v1 \
       --agent=agents/implicit_flows_v2.py \
+      --agent.q_agg=min || true
+
+    run_exp "implicit_flows_v2-relocate-expert-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=relocate-expert-v1 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.ret_agg=min \
       --agent.q_agg=min || true
   fi
 
@@ -96,7 +162,50 @@ for seed in "${SEED_LIST[@]}"; do
       --env_name=antmaze-large-navigate-singletask-task1-v0 \
       --online_steps=1000000 \
       --agent=agents/implicit_flows_v2.py \
+      --agent.alpha=30 \
       --agent.q_agg=min || true
+
+    run_exp "implicit_flows_v2-humanoidmaze-online-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=humanoidmaze-medium-navigate-singletask-task1-v0 \
+      --online_steps=1000000 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.discount=0.995 \
+      --agent.alpha=100 \
+      --agent.q_agg=min \
+      --agent.ret_agg=min || true
+
+    run_exp "implicit_flows_v2-cube-double-online-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=cube-double-play-singletask-task2-v0 \
+      --online_steps=1000000 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.discount=0.995 \
+      --agent.alpha=300 || true
+
+    run_exp "implicit_flows_v2-cube-triple-online-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=cube-triple-play-singletask-task1-v0 \
+      --online_steps=1000000 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.discount=0.995 \
+      --agent.alpha=300 || true
+
+    run_exp "implicit_flows_v2-puzzle4-online-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=puzzle-4x4-play-singletask-task4-v0 \
+      --online_steps=1000000 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.alpha=300 \
+      --agent.q_agg=min || true
+
+    run_exp "implicit_flows_v2-scene-online-seed${seed}" \
+      --seed="${seed}" \
+      --env_name=scene-play-singletask-task2-v0 \
+      --online_steps=1000000 \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.alpha=300 \
+      --agent.ret_agg=min || true
   fi
 done
 
@@ -108,4 +217,5 @@ if [[ "${#FAILED_JOBS[@]}" -gt 0 ]]; then
   exit 1
 fi
 
-echo "All implicit_flows_v2 test experiments finished."
+echo "All implicit_flows_v2 experiments finished."
+
