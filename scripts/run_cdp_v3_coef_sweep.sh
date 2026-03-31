@@ -8,11 +8,11 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 SAVE_ROOT="${SAVE_ROOT:-cdpv3_coef_sweep_results}"
 SEEDS_STR="${SEEDS:-0}"
 TASK_IDS_STR="${TASK_IDS:-task1}"
-OFFLINE_STEPS="${OFFLINE_STEPS:-400000}"
+OFFLINE_STEPS="${OFFLINE_STEPS:-1000000}"
 
 # Grid search ranges (can be overridden by env vars).
-DRIFT_TEMPS_STR="${DRIFT_TEMPS:-1 5 20}"
-POS_PROB_TEMPS_STR="${POS_PROB_TEMPS:-0.1 3 5 10}"
+DRIFT_TEMPS_STR="${DRIFT_TEMPS:-10 20 50}"
+POS_PROB_TEMPS_STR="${POS_PROB_TEMPS:-5 10 20}"
 
 IFS=' ' read -r -a SEED_LIST <<< "$SEEDS_STR"
 IFS=' ' read -r -a TASK_IDS <<< "$TASK_IDS_STR"
