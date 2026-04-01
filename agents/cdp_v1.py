@@ -62,7 +62,13 @@ def drifting_loss(gen: jnp.ndarray, pos: jnp.ndarray, temp: float = 0.05):
 
 
 class CDPV1Agent(flax.struct.PyTreeNode):
-    """CDP v1 agent."""
+    """CDP v1 agent.
+
+    Quick map:
+    - Single actor (`actor_onestep_flow`).
+    - Critic loss = Bellman TD + CQL OOD penalty.
+    - Actor drift positives = dataset action + actor-sampled top-k Q actions.
+    """
 
     rng: Any
     network: Any

@@ -61,7 +61,15 @@ def drifting_loss(gen: jnp.ndarray, pos: jnp.ndarray, temp: float = 0.05):
 
 
 class CDPV2Agent(flax.struct.PyTreeNode):
-    """CDP v2 agent."""
+    """CDP v2 agent.
+
+    Quick map:
+    - Critic loss is pure Bellman TD (no CQL term).
+    - Two actors: behavior actor (dataset-only positives) and policy actor
+      (positives sampled from behavior candidates via exp(Q) probabilities).
+    - Actor loss = weighted sum of behavior drift and policy drift losses.
+    - Critic bootstrap uses the policy actor, not the behavior actor.
+    """
 
     rng: Any
     network: Any

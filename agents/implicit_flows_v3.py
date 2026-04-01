@@ -61,8 +61,8 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         return_low = self.config['min_reward'] / (1 - self.config['discount'])
         return_high = self.config['max_reward'] / (1 - self.config['discount'])
 
-        clip_low = times * gaussian_low + (1 - times) * return_low - self.config['next_return_clip_slack']
-        clip_high = times * gaussian_high + (1 - times) * return_high + self.config['next_return_clip_slack']
+        clip_low = (1 - times) * gaussian_low + times * return_low - self.config['next_return_clip_slack']
+        clip_high = (1 - times) * gaussian_high + times * return_high + self.config['next_return_clip_slack']
         clip_high = jnp.maximum(clip_high, clip_low + 1e-6)
 
         noisy_next_returns1 = jnp.clip(noisy_next_returns1, clip_low, clip_high)
