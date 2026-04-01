@@ -10,6 +10,7 @@ from agents.ifql import IFQLAgent
 from agents.implicit_flows import ImplicitFlowsAgent
 from agents.implicit_flows_v1 import ImplicitFlowsV1Agent
 from agents.implicit_flows_v2 import ImplicitFlowsV2Agent
+from agents.implicit_flows_v3 import ImplicitFlowsV3Agent
 from agents.iql import IQLAgent
 from agents.iqn import IQNAgent
 from agents.rebrac import ReBRACAgent
@@ -29,6 +30,7 @@ agents = dict(
     implicit_flows=ImplicitFlowsAgent,
     implicit_flows_v1=ImplicitFlowsV1Agent,
     implicit_flows_v2=ImplicitFlowsV2Agent,
+    implicit_flows_v3=ImplicitFlowsV3Agent,
     iql=IQLAgent,
     iqn=IQNAgent,
     rebrac=ReBRACAgent,
