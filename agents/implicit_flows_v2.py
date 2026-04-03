@@ -48,8 +48,9 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
         next_ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
         next_ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
 
-        # Time-dependent noisy-next-return truncation:
+        # Time-dependent clipping anchor:
         # t=0 -> Gaussian 3-sigma interval, t=1 -> return range.
+        # Here we use t+delta because we clip one-step-ahead learning targets.
         gaussian_low = (
             self.config['next_return_gaussian_mean']
             - self.config['next_return_clip_sigma'] * self.config['next_return_gaussian_std']
@@ -60,13 +61,20 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
         )
         return_low = self.config['min_reward'] / (1 - self.config['discount'])
         return_high = self.config['max_reward'] / (1 - self.config['discount'])
+        delta = 1.0 / self.config['num_flow_steps']
+        next_times = jnp.minimum(times + delta, 1.0)
 
-        clip_low = (1 - times) * gaussian_low + times * return_low - self.config['next_return_clip_slack']
-        clip_high = (1 - times) * gaussian_high + times * return_high + self.config['next_return_clip_slack']
+        clip_low = (
+            (1 - next_times) * gaussian_low
+            + next_times * return_low
+            - self.config['next_return_clip_slack']
+        )
+        clip_high = (
+            (1 - next_times) * gaussian_high
+            + next_times * return_high
+            + self.config['next_return_clip_slack']
+        )
         clip_high = jnp.maximum(clip_high, clip_low + 1e-6)
-
-        noisy_next_returns1 = jnp.clip(noisy_next_returns1, clip_low, clip_high)
-        noisy_next_returns2 = jnp.clip(noisy_next_returns2, clip_low, clip_high)
 
         ret_stds1 = next_ret_stds1
         ret_stds2 = next_ret_stds2
@@ -96,18 +104,10 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
         next_vector_field2 = self.network.select('target_critic_flow2')(
             mixed_next_returns, times, batch['next_observations'], next_actions
         )
-        # Clip next vector fields:
-        # upper = return_high - gaussian_low, lower = return_low - gaussian_high.
-        next_vector_clip_low = (
-            return_low
-            - gaussian_high
-            - self.config['next_vector_clip_slack']
-        )
-        next_vector_clip_high = (
-            return_high
-            - gaussian_low
-            + self.config['next_vector_clip_slack']
-        )
+        # Clip next vector fields so one-step prediction stays inside [clip_low, clip_high]:
+        # mixed_next_returns + delta * next_vector_field in bounds.
+        next_vector_clip_low = (clip_low - mixed_next_returns) / delta
+        next_vector_clip_high = (clip_high - mixed_next_returns) / delta
         next_vector_clip_high = jnp.maximum(next_vector_clip_high, next_vector_clip_low + 1e-6)
         next_vector_field1 = jnp.clip(next_vector_field1, next_vector_clip_low, next_vector_clip_high)
         next_vector_field2 = jnp.clip(next_vector_field2, next_vector_clip_low, next_vector_clip_high)
@@ -216,7 +216,7 @@ class ImplicitFlowsV2Agent(flax.struct.PyTreeNode):
 
         q_loss = -q.mean()
         if self.config['normalize_q_loss']:
-            lam = jax.lax.stop_gradient(1 / jnp.abs(q).mean())
+            lam = jax.lax.stop_gradient(1 / (jnp.abs(q).mean() + 1e-8))
             q_loss = lam * q_loss
 
         actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss + q_loss
@@ -568,7 +568,6 @@ def get_config():
             next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
             next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.
             next_return_clip_slack=0.05,  # Relaxation margin for lower/upper clipping bounds.
-            next_vector_clip_slack=0.05,  # Relaxation margin for next-vector-field clipping bounds.
             alpha_softmax_temp=2.0,  # Deprecated/unused (alpha-weighted next-return mixing removed).
             disagreement_softplus_scale=5.0,  # Deprecated/unused (disagreement hard/soft mixing removed).
             alpha=10.0,

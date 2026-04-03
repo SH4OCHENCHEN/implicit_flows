@@ -11,12 +11,13 @@ TASK_IDS_STR="${TASK_IDS:-task1}"
 OFFLINE_STEPS="${OFFLINE_STEPS:-1000000}"
 
 # Grid search ranges (can be overridden by env vars).
-DRIFT_TEMPS_STR="${DRIFT_TEMPS:-10 20 50}"
+ACTOR_DRIFT_TEMPS_STR="${ACTOR_DRIFT_TEMPS:-${DRIFT_TEMPS:-10 20 50}}"
+BEHAVIOR_DRIFT_TEMP="${BEHAVIOR_DRIFT_TEMP:-50}"
 POS_PROB_TEMPS_STR="${POS_PROB_TEMPS:-5 10 20}"
 
 IFS=' ' read -r -a SEED_LIST <<< "$SEEDS_STR"
 IFS=' ' read -r -a TASK_IDS <<< "$TASK_IDS_STR"
-IFS=' ' read -r -a DRIFT_TEMPS <<< "$DRIFT_TEMPS_STR"
+IFS=' ' read -r -a ACTOR_DRIFT_TEMPS <<< "$ACTOR_DRIFT_TEMPS_STR"
 IFS=' ' read -r -a POS_PROB_TEMPS <<< "$POS_PROB_TEMPS_STR"
 
 mkdir -p "$SAVE_ROOT"
@@ -46,15 +47,16 @@ run_exp() {
 
 for seed in "${SEED_LIST[@]}"; do
   for task_id in "${TASK_IDS[@]}"; do
-    for drift_temp in "${DRIFT_TEMPS[@]}"; do
+    for actor_drift_temp in "${ACTOR_DRIFT_TEMPS[@]}"; do
       for pos_prob_temp in "${POS_PROB_TEMPS[@]}"; do
-        run_exp "cdp_v3-cube-double-${task_id}-seed${seed}-dt${drift_temp}-ppt${pos_prob_temp}" \
+        run_exp "cdp_v3-cube-double-${task_id}-seed${seed}-adt${actor_drift_temp}-ppt${pos_prob_temp}" \
           --seed="${seed}" \
           --env_name="cube-double-play-singletask-${task_id}-v0" \
           --agent=agents/cdp_v3.py \
           --offline_steps="${OFFLINE_STEPS}" \
           --agent.discount=0.995 \
-          --agent.drift_temp="${drift_temp}" \
+          --agent.behavior_drift_temp="${BEHAVIOR_DRIFT_TEMP}" \
+          --agent.actor_drift_temp="${actor_drift_temp}" \
           --agent.pos_prob_temp="${pos_prob_temp}" || true
       done
     done

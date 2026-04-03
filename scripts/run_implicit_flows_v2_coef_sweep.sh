@@ -10,7 +10,7 @@ SEEDS_STR="${SEEDS:-0}"
 TASK_IDS_STR="${TASK_IDS:-task1}"
 
 # Sweep values (can be overridden by env var).
-CONF_WEIGHT_TEMPS_STR="${CONF_WEIGHT_TEMPS:-0.1 1 5 10 20 50}"
+CONF_WEIGHT_TEMPS_STR="${CONF_WEIGHT_TEMPS:-0.001 0.01 0.1 1 10 100}"
 
 IFS=' ' read -r -a SEED_LIST <<< "$SEEDS_STR"
 IFS=' ' read -r -a TASK_IDS <<< "$TASK_IDS_STR"

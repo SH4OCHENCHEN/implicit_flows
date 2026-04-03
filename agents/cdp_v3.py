@@ -150,7 +150,7 @@ class CDPV3Agent(flax.struct.PyTreeNode):
             raw_behavior_actions,
             behavior_pos_actions,
             raw_behavior_actions,
-            temp=self.config['drift_temp'],
+            temp=self.config['behavior_drift_temp'],
             exclude_self_neg=True,
         )
 
@@ -255,7 +255,7 @@ class CDPV3Agent(flax.struct.PyTreeNode):
             raw_policy_actions,
             policy_pos_actions,
             policy_neg_actions,
-            temp=self.config['drift_temp'],
+            temp=self.config['actor_drift_temp'],
         )
 
         # Total actor loss: train both actors together.
@@ -453,7 +453,8 @@ def get_config():
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
             q_agg='min',  # Aggregation method for target Q values.\
-            drift_temp=0.01,  # Temperature used in drifting BC.
+            behavior_drift_temp=50.0,  # Drift temperature for behavior actor.
+            actor_drift_temp=5.0,  # Drift temperature for policy actor.
             drift_batch_weight=1.0,  # Weight of behavior-actor drifting loss (single dataset positive).
             drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (sampled behavior positives).
             num_neg=16,  # Number of negative/generated samples per state (same for both actors).
