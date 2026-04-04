@@ -554,22 +554,14 @@ def get_config():
             q_agg='mean',
             clip_flow_actions=True,
             clip_flow_returns=True,
-            addq_low_threshold=0.75,
-            addq_high_threshold=1.25,
-            addq_beta_low=0.25,
-            addq_beta_mid=0.5,
-            addq_beta_high=0.75,
-            addq_eps=1e-8,
             num_samples=16,
             num_flow_steps=10,
             normalize_q_loss=False,
-            confidence_weight_temp=50,  # Temperature for the confidence weights.
+            confidence_weight_temp=10,  # Temperature for the confidence weights.
             next_return_gaussian_mean=0.0,  # Gaussian mean for t=0 next-return clipping anchor.
             next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
             next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.
             next_return_clip_slack=0.05,  # Relaxation margin for lower/upper clipping bounds.
-            alpha_softmax_temp=2.0,  # Deprecated/unused (alpha-weighted next-return mixing removed).
-            disagreement_softplus_scale=5.0,  # Deprecated/unused (disagreement hard/soft mixing removed).
             alpha=10.0,
             encoder=ml_collections.config_dict.placeholder(str),
         )
