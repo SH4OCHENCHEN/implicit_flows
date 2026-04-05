@@ -72,7 +72,7 @@ def smooth_path(x0, x1, y_base=0.5, amp=0.06, slope=0.0, phase=0.0):
 
 def draw_panel_A(ax):
     clean_axis(ax)
-    panel_title(ax, "Panel A   Prior flow-based Bellman update")
+    panel_title(ax, "(a)   Prior flow-based Bellman update")
 
     ax.text(0.07, 0.84, "current return flow", fontsize=10, color=BLACK)
     noise_disk(ax, (0.10, 0.68), r=0.058, text="noise")
@@ -97,7 +97,7 @@ def draw_panel_A(ax):
     arrow(ax, (0.69, 0.30), (0.73, 0.52), color=RED, lw=1.2, ms=11)
     arrow(ax, (0.73, 0.52), (0.73, 0.57), color=RED, lw=1.2, ms=11)
     ax.plot([0.70, 0.86], [0.50, 0.50], color=RED, lw=1.0, ls="--", alpha=0.9)
-    ax.text(0.83, 0.48, "used as supervision target", fontsize=8.8, color=RED, ha="right")
+    # ax.text(0.83, 0.48, "used as supervision target", fontsize=8.8, color=RED, ha="right")
 
     for x in [0.71, 0.78, 0.85]:
         arrow(ax, (x, 0.70), (x+0.018, 0.63-0.018*np.sin(12*x)), color=RED, lw=0.8, ms=8, alpha=0.85)
@@ -109,7 +109,7 @@ def draw_panel_A(ax):
 
 def draw_panel_B(ax):
     clean_axis(ax)
-    panel_title(ax, "Panel B   Our pathwise / any-$t$ Bellman update")
+    panel_title(ax, "(b)   Our pathwise / any-$t$ Bellman update")
 
     scatter_cloud(ax, (0.13, 0.47), spread=(0.03, 0.10), n=50, color=BLUE, alpha=0.42, seed=1, s=12)
     ax.text(0.13, 0.79, "noise", ha="center", fontsize=10)
@@ -144,7 +144,7 @@ def draw_panel_B(ax):
 
 def draw_panel_C(ax):
     clean_axis(ax)
-    panel_title(ax, "Panel C   Variance-aware local weighting")
+    panel_title(ax, "(c)   Variance-aware local weighting")
 
     x0, y0 = 0.13, 0.18
     x1, y1 = 0.90, 0.78
@@ -196,7 +196,7 @@ def draw_panel_C(ax):
 
 def draw_panel_D(ax):
     clean_axis(ax)
-    panel_title(ax, "Panel D   Time-dependent support clipping")
+    panel_title(ax, "(d)   Time-dependent support clipping")
 
     ax.plot([0.10, 0.92], [0.10, 0.10], color=GRAY, lw=1.0)
     arrow(ax, (0.92, 0.10), (0.96, 0.10), color=GRAY, lw=1.0, ms=12)
@@ -268,7 +268,7 @@ draw_panel_D(axD)
 fig.suptitle("From full-sample Bellman supervision to pathwise Bellman supervision",
              y=0.99, fontsize=17, color=BLACK, weight="medium")
 
-fig.savefig("pathwise_bellman_method_figure_v3.png", bbox_inches="tight", facecolor="white")
-fig.savefig("pathwise_bellman_method_figure_v3.pdf", bbox_inches="tight", facecolor="white")
-fig.savefig("pathwise_bellman_method_figure_v3.svg", bbox_inches="tight", facecolor="white")
+fig.savefig("pathwise_bellman_method_figure_v2.png", bbox_inches="tight", facecolor="white")
+fig.savefig("pathwise_bellman_method_figure_v2.pdf", bbox_inches="tight", facecolor="white")
+fig.savefig("pathwise_bellman_method_figure_v2.svg", bbox_inches="tight", facecolor="white")
 plt.show()
