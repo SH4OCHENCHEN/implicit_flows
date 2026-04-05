@@ -77,7 +77,7 @@ def smooth_path(x0, x1, y_base=0.5, amp=0.06, slope=0.0, phase=0.0):
 # ---------------------- panels ----------------------
 def draw_panel_A(ax):
     clean_axis(ax)
-    panel_title(ax, "Panel A   Prior flow-based Bellman update")
+    panel_title(ax, "(a)   Prior flow-based Bellman update")
 
     # Upper flow: current return
     ax.text(0.08, 0.83, "current return flow", fontsize=10, color=BLACK)
@@ -115,7 +115,7 @@ def draw_panel_A(ax):
 
 def draw_panel_B(ax):
     clean_axis(ax)
-    panel_title(ax, "Panel B   Our pathwise / any-$t$ Bellman update")
+    panel_title(ax, "(b)   Our pathwise / any-$t$ Bellman update")
 
     # endpoints
     scatter_cloud(ax, (0.13, 0.47), spread=(0.03, 0.10), n=50, color=BLUE, alpha=0.42, seed=1, s=12)
@@ -155,7 +155,7 @@ def draw_panel_B(ax):
 
 def draw_panel_C(ax):
     clean_axis(ax)
-    panel_title(ax, "Panel C   Variance-aware local weighting")
+    panel_title(ax, "(c)   Variance-aware local weighting")
 
     # coordinate system
     x0, y0 = 0.13, 0.18
@@ -210,7 +210,7 @@ def draw_panel_C(ax):
 
 def draw_panel_D(ax):
     clean_axis(ax)
-    panel_title(ax, "Panel D   Time-dependent support clipping")
+    panel_title(ax, "(d)   Time-dependent support clipping")
 
     # time axis
     ax.plot([0.10, 0.92], [0.10, 0.10], color=GRAY, lw=1.0)
@@ -289,10 +289,10 @@ draw_panel_B(axB)
 draw_panel_C(axC)
 draw_panel_D(axD)
 
-fig.suptitle(
-    "From full-sample Bellman supervision to pathwise Bellman supervision",
-    y=0.99, fontsize=17, color=BLACK, weight="medium"
-)
+# fig.suptitle(
+#     "From full-sample Bellman supervision to pathwise Bellman supervision",
+#     y=0.99, fontsize=17, color=BLACK, weight="medium"
+# )
 
 fig.savefig("pathwise_bellman_method_figure_v2.png", bbox_inches="tight", facecolor="white")
 fig.savefig("pathwise_bellman_method_figure_v2.pdf", bbox_inches="tight", facecolor="white")

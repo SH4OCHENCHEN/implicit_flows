@@ -422,9 +422,7 @@ def get_config():
             drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (all behavior positives, Q-weighted).
             num_neg=16,  # Number of negative/generated samples per state (same for both actors).
             num_samples=16,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).
-            pos_topk=4,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).
             pos_prob_temp=10,  # Temperature for exp(Q) sampling probabilities.
-            policy_neg_raw_ratio=4.0,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).
             policy_neg_behavior_ratio=1.0,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
