@@ -11,6 +11,9 @@ dist/
 debug_video/
 *.mp4
 *.pkl
+*.pdf
+*.png
+*.svg
 exp/
 logs/
 baseline_result/
