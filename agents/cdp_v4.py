@@ -94,6 +94,30 @@ def drifting_loss(
     return jnp.mean((gen - target) ** 2)
 
 
+def multi_temp_drifting_loss(
+    gen: jnp.ndarray,
+    pos: jnp.ndarray,
+    neg: jnp.ndarray,
+    temps,
+    exclude_self_neg: bool = False,
+    pos_logit_bias=None,
+    neg_logit_bias=None,
+):
+    """Sum drifting losses computed with multiple temperatures."""
+    loss = jnp.asarray(0.0, dtype=gen.dtype)
+    for temp in temps:
+        loss = loss + drifting_loss(
+            gen,
+            pos,
+            neg,
+            temp=float(temp),
+            exclude_self_neg=exclude_self_neg,
+            pos_logit_bias=pos_logit_bias,
+            neg_logit_bias=neg_logit_bias,
+        )
+    return loss
+
+
 class CDPV4Agent(flax.struct.PyTreeNode):
     """CDP v4 agent with weighted behavior positives for policy drift."""
 
@@ -133,6 +157,7 @@ class CDPV4Agent(flax.struct.PyTreeNode):
         """Train behavior/policy actors with drifting losses and different positive sets."""
         batch_size, action_dim = batch['actions'].shape
         num_neg = self.config['num_neg']
+        drift_temps = self.config['drift_temps']
         rng, behavior_noise_rng, policy_x_noise_rng, mse_rng = jax.random.split(rng, 4)
 
         # =========================
@@ -149,11 +174,11 @@ class CDPV4Agent(flax.struct.PyTreeNode):
         )
         raw_behavior_actions = raw_behavior_actions_flat.reshape((batch_size, num_neg, action_dim))
         behavior_pos_actions = batch['actions'][:, None, :]
-        behavior_drift_loss = drifting_loss(
+        behavior_drift_loss = multi_temp_drifting_loss(
             raw_behavior_actions,
             behavior_pos_actions,
             raw_behavior_actions,
-            temp=self.config['behavior_drift_temp'],
+            temps=drift_temps,
             exclude_self_neg=True,
         )
 
@@ -190,11 +215,11 @@ class CDPV4Agent(flax.struct.PyTreeNode):
         pos_probs = jax.lax.stop_gradient(pos_probs)
         pos_logit_bias = jnp.expand_dims(jnp.log(pos_probs + 1e-12), axis=1)
 
-        policy_drift_loss = drifting_loss(
+        policy_drift_loss = multi_temp_drifting_loss(
             raw_policy_actions,
             behavior_pos_actions,
             raw_policy_actions,
-            temp=self.config['actor_drift_temp'],
+            temps=drift_temps,
             exclude_self_neg=True,
             pos_logit_bias=pos_logit_bias,
         )
@@ -221,6 +246,7 @@ class CDPV4Agent(flax.struct.PyTreeNode):
             'lam_mean': lam.mean(),
             'lam_min': lam.min(),
             'lam_max': lam.max(),
+            'drift_temp_count': jnp.asarray(len(drift_temps)),
             'pos_entropy': (-pos_probs * jnp.log(pos_probs + 1e-12)).sum(axis=1).mean(),
             'mse': mse,
         }
@@ -391,14 +417,13 @@ def get_config():
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
             q_agg='min',  # Aggregation method for target Q values.\
-            behavior_drift_temp=50.0,  # Drift temperature for behavior actor.
-            actor_drift_temp=5.0,  # Drift temperature for policy actor.
+            drift_temps=(0.1, 1.0, 10.0),  # Multi-temperature drift loss (summed over all temps).
             drift_batch_weight=1.0,  # Weight of behavior-actor drifting loss (single dataset positive).
             drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (all behavior positives, Q-weighted).
             num_neg=16,  # Number of negative/generated samples per state (same for both actors).
             num_samples=16,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).
             pos_topk=4,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).
-            pos_prob_temp=0.001,  # Temperature for exp(Q) sampling probabilities.
+            pos_prob_temp=10,  # Temperature for exp(Q) sampling probabilities.
             policy_neg_raw_ratio=4.0,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).
             policy_neg_behavior_ratio=1.0,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
