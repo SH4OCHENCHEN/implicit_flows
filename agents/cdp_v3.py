@@ -77,7 +77,14 @@ def drifting_loss(
 
 
 class CDPV3Agent(flax.struct.PyTreeNode):
-    """CDP v3 agent with explicit positive/negative drift sets."""
+    """CDP v3 agent with explicit positive/negative drift sets.
+
+    Diff vs `cdp_v2`:
+    - Drift is rewritten to use explicit `(gen, pos, neg)` sets.
+    - Policy drift negatives become a configurable mixture of
+      policy-generated and behavior-generated negatives.
+    - Uses separate drift temperatures for behavior/policy branches.
+    """
 
     rng: Any
     network: Any

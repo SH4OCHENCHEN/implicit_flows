@@ -9,7 +9,7 @@ import optax
 
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import ActorVectorField, Value
+from utils.networks import Actor, ActorVectorField, Value
 
 
 # ============================================================
@@ -119,7 +119,15 @@ def multi_temp_drifting_loss(
 
 
 class CDPV4Agent(flax.struct.PyTreeNode):
-    """CDP v4 agent with weighted behavior positives for policy drift."""
+    """CDP v4 agent with weighted behavior positives for policy drift.
+
+    Diff vs `cdp_v3`:
+    - Adds multi-temperature drift (`drift_temps`) and sums losses across temps.
+    - Policy positives use all behavior-generated samples with Q-based
+      logit bias weights (instead of sampled top-k subset).
+    - Policy negatives are simplified to policy self-generated samples.
+    - Behavior branch uses a Gaussian actor trained with behavior cloning.
+    """
 
     rng: Any
     network: Any
@@ -158,35 +166,25 @@ class CDPV4Agent(flax.struct.PyTreeNode):
         batch_size, action_dim = batch['actions'].shape
         num_neg = self.config['num_neg']
         drift_temps = self.config['drift_temps']
-        rng, behavior_noise_rng, policy_x_noise_rng, mse_rng = jax.random.split(rng, 4)
+        rng, behavior_sample_rng, policy_x_noise_rng, mse_rng = jax.random.split(rng, 4)
 
         # =========================
         # 1) Behavior actor loss:
-        # positives = dataset action only (one positive)
+        # behavior cloning (Gaussian NLL on dataset actions)
         # =========================
-        behavior_noises = jax.random.normal(behavior_noise_rng, (batch_size, num_neg, action_dim))
-        obs_repeat = jnp.repeat(batch['observations'][:, None, ...], num_neg, axis=1)
-        obs_flat = obs_repeat.reshape((batch_size * num_neg, *batch['observations'].shape[1:]))
-        behavior_noises_flat = behavior_noises.reshape((batch_size * num_neg, action_dim))
-
-        raw_behavior_actions_flat = self.network.select('actor_behavior_onestep_flow')(
-            obs_flat, behavior_noises_flat, params=grad_params
+        behavior_dist = self.network.select('actor_behavior_onestep_flow')(
+            batch['observations'], params=grad_params
         )
-        raw_behavior_actions = raw_behavior_actions_flat.reshape((batch_size, num_neg, action_dim))
-        behavior_pos_actions = batch['actions'][:, None, :]
-        behavior_drift_loss = multi_temp_drifting_loss(
-            raw_behavior_actions,
-            behavior_pos_actions,
-            raw_behavior_actions,
-            temps=drift_temps,
-            exclude_self_neg=True,
-        )
+        behavior_bc_loss = -behavior_dist.log_prob(batch['actions']).mean()
 
         # =========================
         # 2) Policy actor loss:
         # positives are all behavior-generated samples (with per-positive weights from exp(Q))
         # negatives are policy self-generated samples.
         # =========================
+        obs_repeat = jnp.repeat(batch['observations'][:, None, ...], num_neg, axis=1)
+        obs_flat = obs_repeat.reshape((batch_size * num_neg, *batch['observations'].shape[1:]))
+
         policy_x_noises = jax.random.normal(policy_x_noise_rng, (batch_size, num_neg, action_dim))
         policy_x_noises_flat = policy_x_noises.reshape((batch_size * num_neg, action_dim))
         raw_policy_actions_flat = self.network.select('actor_onestep_flow')(
@@ -194,8 +192,10 @@ class CDPV4Agent(flax.struct.PyTreeNode):
         )
         raw_policy_actions = raw_policy_actions_flat.reshape((batch_size, num_neg, action_dim))
 
-        # Reuse behavior samples from the behavior-loss branch as policy positives.
-        behavior_pos_actions = jnp.clip(raw_behavior_actions, -1, 1)
+        # Sample behavior actions as policy positives.
+        behavior_pos_actions = behavior_dist.sample(seed=behavior_sample_rng, sample_shape=(num_neg,))
+        behavior_pos_actions = jnp.swapaxes(behavior_pos_actions, 0, 1)
+        behavior_pos_actions = jnp.clip(behavior_pos_actions, -1, 1)
         behavior_pos_actions_flat = behavior_pos_actions.reshape((batch_size * num_neg, action_dim))
 
         behavior_pos_qs = self.network.select('critic')(obs_flat, actions=behavior_pos_actions_flat)
@@ -226,7 +226,7 @@ class CDPV4Agent(flax.struct.PyTreeNode):
 
         # Total actor loss: train both actors together.
         actor_loss = (
-            self.config['drift_batch_weight'] * behavior_drift_loss
+            self.config['drift_batch_weight'] * behavior_bc_loss
             + self.config['drift_prob_weight'] * policy_drift_loss
         )
 
@@ -236,9 +236,10 @@ class CDPV4Agent(flax.struct.PyTreeNode):
 
         return actor_loss, {
             'actor_loss': actor_loss,
-            'behavior_drift_loss': behavior_drift_loss,
+            'behavior_bc_loss': behavior_bc_loss,
+            'behavior_drift_loss': behavior_bc_loss,  # backward-compatible key
             'policy_drift_loss': policy_drift_loss,
-            'drift_batch_loss': behavior_drift_loss,  # backward-compatible key
+            'drift_batch_loss': behavior_bc_loss,  # backward-compatible key
             'drift_prob_loss': policy_drift_loss,  # backward-compatible key
             'pos_q': behavior_pos_q.mean(),
             'pos_q_scaled': behavior_pos_q_scaled.mean(),
@@ -248,6 +249,8 @@ class CDPV4Agent(flax.struct.PyTreeNode):
             'lam_max': lam.max(),
             'drift_temp_count': jnp.asarray(len(drift_temps)),
             'pos_entropy': (-pos_probs * jnp.log(pos_probs + 1e-12)).sum(axis=1).mean(),
+            'behavior_bc_log_prob': behavior_dist.log_prob(batch['actions']).mean(),
+            'behavior_std': jnp.mean(behavior_dist.scale_diag),
             'mse': mse,
         }
 
@@ -319,16 +322,11 @@ class CDPV4Agent(flax.struct.PyTreeNode):
         seed=None,
         temperature=1.0,
     ):
-        """Sample actions from the behavior one-step actor."""
-        seed, action_seed = jax.random.split(seed)
-        noises = jax.random.normal(
-            action_seed,
-            (
-                *observations.shape[: -len(self.config['ob_dims'])],
-                self.config['action_dim'],
-            ),
+        """Sample actions from the behavior Gaussian actor."""
+        dist = self.network.select('actor_behavior_onestep_flow')(
+            observations, temperature=temperature
         )
-        actions = self.network.select('actor_behavior_onestep_flow')(observations, noises)
+        actions = dist.sample(seed=seed)
         actions = jnp.clip(actions, -1, 1)
         return actions
 
@@ -373,7 +371,7 @@ class CDPV4Agent(flax.struct.PyTreeNode):
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor_onestep_flow'),
         )
-        actor_behavior_onestep_flow_def = ActorVectorField(
+        actor_behavior_onestep_flow_def = Actor(
             hidden_dims=config['actor_hidden_dims'],
             action_dim=action_dim,
             layer_norm=config['actor_layer_norm'],
@@ -384,7 +382,7 @@ class CDPV4Agent(flax.struct.PyTreeNode):
             critic=(critic_def, (ex_observations, ex_actions)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations, ex_actions)),
             actor_onestep_flow=(actor_onestep_flow_def, (ex_observations, ex_actions)),
-            actor_behavior_onestep_flow=(actor_behavior_onestep_flow_def, (ex_observations, ex_actions)),
+            actor_behavior_onestep_flow=(actor_behavior_onestep_flow_def, (ex_observations,)),
         )
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
@@ -418,7 +416,7 @@ def get_config():
             tau=0.005,  # Target network update rate.
             q_agg='min',  # Aggregation method for target Q values.\
             drift_temps=(0.1, 1.0, 10.0),  # Multi-temperature drift loss (summed over all temps).
-            drift_batch_weight=1.0,  # Weight of behavior-actor drifting loss (single dataset positive).
+            drift_batch_weight=1.0,  # Weight of behavior-cloning loss for behavior Gaussian actor.
             drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (all behavior positives, Q-weighted).
             num_neg=32,  # Number of negative/generated samples per state (same for both actors).
             num_samples=16,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).

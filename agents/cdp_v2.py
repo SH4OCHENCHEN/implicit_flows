@@ -64,11 +64,12 @@ class CDPV2Agent(flax.struct.PyTreeNode):
     """CDP v2 agent.
 
     Quick map:
-    - Critic loss is pure Bellman TD (no CQL term).
-    - Two actors: behavior actor (dataset-only positives) and policy actor
-      (positives sampled from behavior candidates via exp(Q) probabilities).
+    - Diff vs `cdp_v1`: removes CQL from critic (pure Bellman TD).
+    - Introduces two actors: behavior actor (dataset-only positives) and
+      policy actor (positives sampled from behavior candidates via exp(Q)).
     - Actor loss = weighted sum of behavior drift and policy drift losses.
     - Critic bootstrap uses the policy actor, not the behavior actor.
+    - This file is your actual "v2" implementation (`agent_name='cdp_v2'`).
     """
 
     rng: Any

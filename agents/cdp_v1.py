@@ -65,9 +65,11 @@ class CDPV1Agent(flax.struct.PyTreeNode):
     """CDP v1 agent.
 
     Quick map:
-    - Single actor (`actor_onestep_flow`).
-    - Critic loss = Bellman TD + CQL OOD penalty.
+    - Diff vs `cdp`: keeps single actor, but upgrades critic to multi-sample
+      CQL (actor samples + uniform samples + logsumexp).
+    - Drift kernel temperature is dimension-adaptive (`temp * sqrt(action_dim)`).
     - Actor drift positives = dataset action + actor-sampled top-k Q actions.
+    - `sample_actions` is direct one-shot policy sampling (no Q-filter rejection).
     """
 
     rng: Any

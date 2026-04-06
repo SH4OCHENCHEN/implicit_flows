@@ -58,7 +58,15 @@ def drifting_loss(gen: jnp.ndarray, pos: jnp.ndarray, temp: float = 0.05):
 
 
 class CDPAgent(flax.struct.PyTreeNode):
-    """Conservative drifting policy agent."""
+    """Conservative drifting policy agent (baseline CDP).
+
+    Version note:
+    - Single actor (`actor_onestep_flow`) + one critic.
+    - Drift uses implicit negatives from generated samples themselves
+      (no explicit `neg` set in `compute_drift`).
+    - Critic = Bellman TD + simple OOD penalty (`q_pi - q_beta`).
+    - `sample_actions` uses multi-sample Q filtering (argmax over sampled actions).
+    """
 
     rng: Any
     network: Any
