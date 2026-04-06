@@ -420,7 +420,7 @@ def get_config():
             drift_temps=(0.1, 1.0, 10.0),  # Multi-temperature drift loss (summed over all temps).
             drift_batch_weight=1.0,  # Weight of behavior-actor drifting loss (single dataset positive).
             drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (all behavior positives, Q-weighted).
-            num_neg=16,  # Number of negative/generated samples per state (same for both actors).
+            num_neg=32,  # Number of negative/generated samples per state (same for both actors).
             num_samples=16,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).
             pos_prob_temp=10,  # Temperature for exp(Q) sampling probabilities.
             policy_neg_behavior_ratio=1.0,  # Deprecated/unused in cdp_v4 policy drift (kept for CLI compatibility).

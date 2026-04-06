@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, FancyArrowPatch, Polygon
 import matplotlib.patches as patches
+from pathlib import Path
 
 plt.rcParams.update({
     "font.family": "DejaVu Sans",
@@ -268,7 +269,19 @@ draw_panel_D(axD)
 fig.suptitle("From full-sample Bellman supervision to pathwise Bellman supervision",
              y=0.99, fontsize=17, color=BLACK, weight="medium")
 
-fig.savefig("pathwise_bellman_method_figure_v2.png", bbox_inches="tight", facecolor="white")
-fig.savefig("pathwise_bellman_method_figure_v2.pdf", bbox_inches="tight", facecolor="white")
-fig.savefig("pathwise_bellman_method_figure_v2.svg", bbox_inches="tight", facecolor="white")
+output_dir = Path(__file__).resolve().parent / "figs"
+output_dir.mkdir(parents=True, exist_ok=True)
+output_stem = output_dir / "pathwise_bellman_method_figure_v2"
+
+png_path = output_stem.with_suffix(".png")
+pdf_path = output_stem.with_suffix(".pdf")
+svg_path = output_stem.with_suffix(".svg")
+
+fig.savefig(png_path, bbox_inches="tight", facecolor="white")
+fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")
+fig.savefig(svg_path, bbox_inches="tight", facecolor="white")
+
+print(f"[plot_pbf] Saved: {png_path}")
+print(f"[plot_pbf] Saved: {pdf_path}")
+print(f"[plot_pbf] Saved: {svg_path}")
 plt.show()
