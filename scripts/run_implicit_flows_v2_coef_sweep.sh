@@ -7,13 +7,15 @@ cd "$ROOT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 SAVE_ROOT="${SAVE_ROOT:-implicit_flows_v2_coef_sweep_result}"
 SEEDS_STR="${SEEDS:-0}"
-TASK_IDS_STR="${TASK_IDS:-task1}"
+
+# Target tasks (override when needed).
+CUBE_TASK_ID="${CUBE_TASK_ID:-task1}"
+PUZZLE_TASK_ID="${PUZZLE_TASK_ID:-task1}"
 
 # Sweep values (can be overridden by env var).
 CONF_WEIGHT_TEMPS_STR="${CONF_WEIGHT_TEMPS:-0.001 0.01 0.1 1 10 100}"
 
 IFS=' ' read -r -a SEED_LIST <<< "$SEEDS_STR"
-IFS=' ' read -r -a TASK_IDS <<< "$TASK_IDS_STR"
 IFS=' ' read -r -a CONF_WEIGHT_TEMPS <<< "$CONF_WEIGHT_TEMPS_STR"
 
 mkdir -p "$SAVE_ROOT"
@@ -42,15 +44,20 @@ run_exp() {
 }
 
 for seed in "${SEED_LIST[@]}"; do
-  for task_id in "${TASK_IDS[@]}"; do
-    for cwt in "${CONF_WEIGHT_TEMPS[@]}"; do
-      run_exp "implicit_flows_v2-cube-double-${task_id}-seed${seed}-cwt${cwt}" \
-        --seed="${seed}" \
-        --env_name="cube-double-play-singletask-${task_id}-v0" \
-        --agent=agents/implicit_flows_v2.py \
-        --agent.discount=0.995 \
-        --agent.confidence_weight_temp="${cwt}" || true
-    done
+  for cwt in "${CONF_WEIGHT_TEMPS[@]}"; do
+    run_exp "implicit_flows_v2-cube-triple-${CUBE_TASK_ID}-seed${seed}-cwt${cwt}" \
+      --seed="${seed}" \
+      --env_name="cube-triple-play-singletask-${CUBE_TASK_ID}-v0" \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.discount=0.995 \
+      --agent.confidence_weight_temp="${cwt}" || true
+
+    run_exp "implicit_flows_v2-puzzle4-${PUZZLE_TASK_ID}-seed${seed}-cwt${cwt}" \
+      --seed="${seed}" \
+      --env_name="puzzle-4x4-play-singletask-${PUZZLE_TASK_ID}-v0" \
+      --agent=agents/implicit_flows_v2.py \
+      --agent.q_agg=min \
+      --agent.confidence_weight_temp="${cwt}" || true
   done
 done
 
