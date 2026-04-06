@@ -22,7 +22,7 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
     def critic_loss(self, batch, grad_params, rng):
         """Compute implicit critic loss (kept from implicit flows)."""
         batch_size = batch['actions'].shape[0]
-        rng, actor_rng, noise_rng, time_rng, q_rng, ret_rng = jax.random.split(rng, 6)
+        rng, actor_rng, noise_rng, time_rng, q_rng, ret_stat_rng, ret_rng = jax.random.split(rng, 7)
 
         # Keep Value Flows style action extraction for the next action.
         next_actions = self.sample_actions(batch['next_observations'], actor_rng)
@@ -48,8 +48,9 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         next_ret_stds1 = jnp.sqrt(ret_jac_eps_prods1 ** 2)
         next_ret_stds2 = jnp.sqrt(ret_jac_eps_prods2 ** 2)
 
-        # Time-dependent noisy-next-return truncation:
+        # Time-dependent clipping anchor:
         # t=0 -> Gaussian 3-sigma interval, t=1 -> return range.
+        # Here we use t+delta because we clip one-step-ahead learning targets.
         gaussian_low = (
             self.config['next_return_gaussian_mean']
             - self.config['next_return_clip_sigma'] * self.config['next_return_gaussian_std']
@@ -60,9 +61,19 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         )
         return_low = self.config['min_reward'] / (1 - self.config['discount'])
         return_high = self.config['max_reward'] / (1 - self.config['discount'])
+        delta = 1.0 / self.config['num_flow_steps']
+        next_times = jnp.minimum(times + delta, 1.0)
 
-        clip_low = (1 - times) * gaussian_low + times * return_low - self.config['next_return_clip_slack']
-        clip_high = (1 - times) * gaussian_high + times * return_high + self.config['next_return_clip_slack']
+        clip_low = (
+            (1 - next_times) * gaussian_low
+            + next_times * return_low
+            - self.config['next_return_clip_slack']
+        )
+        clip_high = (
+            (1 - next_times) * gaussian_high
+            + next_times * return_high
+            + self.config['next_return_clip_slack']
+        )
         clip_high = jnp.maximum(clip_high, clip_low + 1e-6)
 
         ret_stds1 = next_ret_stds1
@@ -79,12 +90,33 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         rt = times * jnp.expand_dims(batch['rewards'], axis=-1) + (1 - times) * r_noises
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
 
-        # Confidence weights from next-return stds: larger std -> smaller weight.
+        # Difference from v2:
+        # confidence weights are computed from CURRENT (s, a) noisy returns/jacobians
+        # via compute_flow_returns, using Value Flows weighting formula.
+        ret_noises = jax.random.normal(ret_stat_rng, (batch_size, 1))
+        current_noisy_returns1, ret_jac_eps_prods1 = self.compute_flow_returns(
+            ret_noises,
+            batch['observations'],
+            batch['actions'],
+            end_times=times,
+            flow_network_name='target_critic_flow1',
+            return_jac_eps_prod=True,
+        )
+        current_noisy_returns2, ret_jac_eps_prods2 = self.compute_flow_returns(
+            ret_noises,
+            batch['observations'],
+            batch['actions'],
+            end_times=times,
+            flow_network_name='target_critic_flow2',
+            return_jac_eps_prod=True,
+        )
+        cur_ret_stds1 = jnp.sqrt(ret_jac_eps_prods1.squeeze(-1) ** 2)
+        cur_ret_stds2 = jnp.sqrt(ret_jac_eps_prods2.squeeze(-1) ** 2)
         if self.config['q_agg'] == 'min':
-            ret_stds = jnp.minimum(ret_stds1, ret_stds2)
+            ret_stds = jnp.minimum(cur_ret_stds1, cur_ret_stds2)
         else:
-            ret_stds = (ret_stds1 + ret_stds2) / 2
-        weights = 0.5 + jax.nn.sigmoid(-self.config['confidence_weight_temp'] * ret_stds)
+            ret_stds = (cur_ret_stds1 + cur_ret_stds2) / 2
+        weights = jax.nn.sigmoid(-self.config['confidence_weight_temp'] / (ret_stds + 1e-8)) + 0.5
         weights = jax.lax.stop_gradient(weights)
 
         next_vector_field1 = self.network.select('target_critic_flow1')(
@@ -93,6 +125,13 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         next_vector_field2 = self.network.select('target_critic_flow2')(
             mixed_next_returns, times, batch['next_observations'], next_actions
         )
+        # Clip next vector fields so one-step prediction stays inside [clip_low, clip_high]:
+        # mixed_next_returns + delta * next_vector_field in bounds.
+        next_vector_clip_low = (clip_low - mixed_next_returns) / delta
+        next_vector_clip_high = (clip_high - mixed_next_returns) / delta
+        next_vector_clip_high = jnp.maximum(next_vector_clip_high, next_vector_clip_low + 1e-6)
+        next_vector_field1 = jnp.clip(next_vector_field1, next_vector_clip_low, next_vector_clip_high)
+        next_vector_field2 = jnp.clip(next_vector_field2, next_vector_clip_low, next_vector_clip_high)
 
         if self.config['ret_agg'] == 'min':
             mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
@@ -118,6 +157,17 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             q_noises, jnp.zeros_like(q_noises), batch['observations'], batch['actions'])).squeeze(-1)
         q2 = (q_noises + self.network.select('critic_flow2')(
             q_noises, jnp.zeros_like(q_noises), batch['observations'], batch['actions'])).squeeze(-1)
+        if self.config['clip_flow_returns']:
+            q1 = jnp.clip(
+                q1,
+                self.config['min_reward'] / (1 - self.config['discount']),
+                self.config['max_reward'] / (1 - self.config['discount']),
+            )
+            q2 = jnp.clip(
+                q2,
+                self.config['min_reward'] / (1 - self.config['discount']),
+                self.config['max_reward'] / (1 - self.config['discount']),
+            )
         if self.config['q_agg'] == 'min':
             q = jnp.minimum(q1, q2)
         else:
@@ -134,6 +184,8 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             'weights_max': weights.max(),
             'next_ret_std_mean': ret_stds.mean(),
             'next_ret_std_max': ret_stds.max(),
+            'cur_noisy_return1_mean': current_noisy_returns1.mean(),
+            'cur_noisy_return2_mean': current_noisy_returns2.mean(),
             'next_return_clip_low_mean': clip_low.mean(),
             'next_return_clip_high_mean': clip_high.mean(),
             'next_return1_mean': noisy_next_returns1.mean(),
@@ -265,18 +317,6 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         if end_times is None:
             end_times = jnp.ones((*noisy_returns.shape[:-1], 1), dtype=noisy_returns.dtype)
         step_size = (end_times - init_times) / self.config['num_flow_steps']
-        # Time-dependent clipping anchor:
-        # t=0 -> Gaussian interval, t=1 -> discounted return range.
-        gaussian_low = (
-            self.config['next_return_gaussian_mean']
-            - self.config['next_return_clip_sigma'] * self.config['next_return_gaussian_std']
-        )
-        gaussian_high = (
-            self.config['next_return_gaussian_mean']
-            + self.config['next_return_clip_sigma'] * self.config['next_return_gaussian_std']
-        )
-        return_low = self.config['min_reward'] / (1 - self.config['discount'])
-        return_high = self.config['max_reward'] / (1 - self.config['discount'])
 
         def func(carry, i):
             noisy_returns, noisy_jac_eps_prod = carry
@@ -291,22 +331,10 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             new_noisy_returns = noisy_returns + step_size * vector_field
             new_noisy_jac_eps_prod = noisy_jac_eps_prod + step_size * jac_eps_prod
             if self.config['clip_flow_returns']:
-                next_times = times + step_size
-                clip_low = (
-                    (1 - next_times) * gaussian_low
-                    + next_times * return_low
-                    - self.config['next_return_clip_slack']
-                )
-                clip_high = (
-                    (1 - next_times) * gaussian_high
-                    + next_times * return_high
-                    + self.config['next_return_clip_slack']
-                )
-                clip_high = jnp.maximum(clip_high, clip_low + 1e-6)
                 new_noisy_returns = jnp.clip(
                     new_noisy_returns,
-                    clip_low,
-                    clip_high,
+                    self.config['min_reward'] / (1 - self.config['discount']),
+                    self.config['max_reward'] / (1 - self.config['discount']),
                 )
 
             return (new_noisy_returns, new_noisy_jac_eps_prod), None
@@ -558,7 +586,7 @@ def get_config():
             num_samples=16,
             num_flow_steps=10,
             normalize_q_loss=False,
-            confidence_weight_temp=50,  # Temperature for the confidence weights.
+            confidence_weight_temp=0.3,  # Temperature for the confidence weights.
             next_return_gaussian_mean=0.0,  # Gaussian mean for t=0 next-return clipping anchor.
             next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
             next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.

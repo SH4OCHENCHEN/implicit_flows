@@ -7,13 +7,12 @@ cd "$ROOT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 SAVE_ROOT="${SAVE_ROOT:-implicit_flows_v1_result}"
 SEEDS_STR="${SEEDS:-0}"
-TASK_IDS_STR="${TASK_IDS:-task1}"
-RUN_OGBENCH="${RUN_OGBENCH:-1}"
-RUN_D4RL="${RUN_D4RL:-0}"
-RUN_ONLINE="${RUN_ONLINE:-0}"
+
+# Target tasks (override when needed).
+CUBE_TASK_ID="${CUBE_TASK_ID:-task1}"
+PUZZLE_TASK_ID="${PUZZLE_TASK_ID:-task1}"
 
 IFS=' ' read -r -a SEED_LIST <<< "$SEEDS_STR"
-IFS=' ' read -r -a TASK_IDS <<< "$TASK_IDS_STR"
 
 mkdir -p "$SAVE_ROOT"
 
@@ -41,63 +40,17 @@ run_exp() {
 }
 
 for seed in "${SEED_LIST[@]}"; do
-  if [[ "$RUN_OGBENCH" == "1" ]]; then
-    for task_id in "${TASK_IDS[@]}"; do
-      run_exp "implicit_flows_v1-scene-${task_id}-seed${seed}" \
-        --seed="${seed}" \
-        --env_name="scene-play-singletask-${task_id}-v0" \
-        --agent=agents/implicit_flows_v1.py \
-        --agent.ret_agg=min || true
+  run_exp "implicit_flows_v1-cube-triple-${CUBE_TASK_ID}-seed${seed}" \
+    --seed="${seed}" \
+    --env_name="cube-triple-play-singletask-${CUBE_TASK_ID}-v0" \
+    --agent=agents/implicit_flows_v1.py \
+    --agent.discount=0.995 || true
 
-      run_exp "implicit_flows_v1-cube-double-${task_id}-seed${seed}" \
-        --seed="${seed}" \
-        --env_name="cube-double-play-singletask-${task_id}-v0" \
-        --agent=agents/implicit_flows_v1.py \
-        --agent.discount=0.995 || true
-
-      run_exp "implicit_flows_v1-cube-triple-${task_id}-seed${seed}" \
-        --seed="${seed}" \
-        --env_name="cube-triple-play-singletask-${task_id}-v0" \
-        --agent=agents/implicit_flows_v1.py \
-        --agent.discount=0.995 || true
-    done
-  fi
-
-  if [[ "$RUN_D4RL" == "1" ]]; then
-    run_exp "implicit_flows_v1-pen-cloned-seed${seed}" \
-      --seed="${seed}" \
-      --env_name=pen-cloned-v1 \
-      --agent=agents/implicit_flows_v1.py \
-      --agent.q_agg=min || true
-
-    run_exp "implicit_flows_v1-door-cloned-seed${seed}" \
-      --seed="${seed}" \
-      --env_name=door-cloned-v1 \
-      --agent=agents/implicit_flows_v1.py \
-      --agent.ret_agg=min \
-      --agent.q_agg=min || true
-
-    run_exp "implicit_flows_v1-hammer-cloned-seed${seed}" \
-      --seed="${seed}" \
-      --env_name=hammer-cloned-v1 \
-      --agent=agents/implicit_flows_v1.py \
-      --agent.q_agg=min || true
-
-    run_exp "implicit_flows_v1-relocate-cloned-seed${seed}" \
-      --seed="${seed}" \
-      --env_name=relocate-cloned-v1 \
-      --agent=agents/implicit_flows_v1.py \
-      --agent.q_agg=min || true
-  fi
-
-  if [[ "$RUN_ONLINE" == "1" ]]; then
-    run_exp "implicit_flows_v1-antmaze-online-seed${seed}" \
-      --seed="${seed}" \
-      --env_name=antmaze-large-navigate-singletask-task1-v0 \
-      --online_steps=1000000 \
-      --agent=agents/implicit_flows_v1.py \
-      --agent.q_agg=min || true
-  fi
+  run_exp "implicit_flows_v1-puzzle4-${PUZZLE_TASK_ID}-seed${seed}" \
+    --seed="${seed}" \
+    --env_name="puzzle-4x4-play-singletask-${PUZZLE_TASK_ID}-v0" \
+    --agent=agents/implicit_flows_v1.py \
+    --agent.q_agg=min || true
 done
 
 if [[ "${#FAILED_JOBS[@]}" -gt 0 ]]; then
