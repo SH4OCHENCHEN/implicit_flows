@@ -185,7 +185,7 @@ class CDPV3Agent(flax.struct.PyTreeNode):
         # =========================
         # 2) Policy actor loss:
         # positives are top-Q behavior-generated candidates
-        # negatives are 32 self-generated + 16 uniformly sampled actions
+        # negatives are 32 self-generated + 4 uniformly sampled actions
         # =========================
         policy_neg_obs_repeat = jnp.repeat(
             batch['observations'][:, None, ...], policy_num_neg, axis=1
@@ -443,14 +443,14 @@ def get_config():
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
             q_agg='min',  # Aggregation method for target Q values.\
-            drift_temps=(0.1, 5.0, 100.0),  # Multi-temperature drift loss (summed over all temps).
+            drift_temps=(0.1, 1.0, 10.0),  # Multi-temperature drift loss (summed over all temps).
             drift_batch_weight=1.0,  # Weight of behavior-actor drifting loss (single dataset positive).
             drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (top-Q behavior positives).
             behavior_num_neg=16,  # Number of generated negatives for behavior drifting.
             policy_pos_candidates=64,  # Number of behavior-generated candidate positives.
             policy_num_pos=16,  # Number of top-Q behavior positives used by policy drifting.
             policy_num_neg=32,  # Number of policy self-generated negatives.
-            policy_num_uniform_neg=16,  # Number of uniformly sampled negatives.
+            policy_num_uniform_neg=4,  # Number of uniformly sampled negatives.
             behavior_drift_temp=50.0,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
             actor_drift_temp=5.0,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
             num_neg=16,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
