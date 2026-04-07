@@ -76,14 +76,34 @@ def drifting_loss(
     return jnp.mean((gen - target) ** 2)
 
 
+def multi_temp_drifting_loss(
+    gen: jnp.ndarray,
+    pos: jnp.ndarray,
+    neg: jnp.ndarray,
+    temps,
+    exclude_self_neg: bool = False,
+):
+    """Sum drifting losses computed with multiple temperatures."""
+    loss = jnp.asarray(0.0, dtype=gen.dtype)
+    for temp in temps:
+        loss = loss + drifting_loss(
+            gen,
+            pos,
+            neg,
+            temp=float(temp),
+            exclude_self_neg=exclude_self_neg,
+        )
+    return loss
+
+
 class CDPV3Agent(flax.struct.PyTreeNode):
     """CDP v3 agent with explicit positive/negative drift sets.
 
     Diff vs `cdp_v2`:
     - Drift is rewritten to use explicit `(gen, pos, neg)` sets.
-    - Policy drift negatives become a configurable mixture of
-      policy-generated and behavior-generated negatives.
-    - Uses separate drift temperatures for behavior/policy branches.
+    - Policy drift positives are top-Q behavior-generated candidates.
+    - Policy drift negatives are policy-generated + uniform samples.
+    - Uses multi-temperature drift loss (`drift_temps`) summed over temps.
     """
 
     rng: Any
@@ -121,148 +141,116 @@ class CDPV3Agent(flax.struct.PyTreeNode):
     def actor_loss(self, batch, grad_params, rng):
         """Train behavior/policy actors with drifting losses and different positive sets."""
         batch_size, action_dim = batch['actions'].shape
-        num_neg = self.config['num_neg']
-        num_pos_samples = self.config['num_samples']
-        pos_draws = min(self.config['pos_topk'], num_pos_samples)
+        behavior_num_neg = self.config['behavior_num_neg']
+        policy_pos_candidates = self.config['policy_pos_candidates']
+        policy_num_pos = self.config['policy_num_pos']
+        policy_num_neg = self.config['policy_num_neg']
+        policy_num_uniform_neg = self.config['policy_num_uniform_neg']
+        drift_temps = self.config['drift_temps']
 
-        raw_neg_ratio = float(self.config['policy_neg_raw_ratio'])
-        behavior_neg_ratio = float(self.config['policy_neg_behavior_ratio'])
-        if num_neg <= 1 or behavior_neg_ratio <= 0:
-            num_policy_neg_behavior = 0
-            num_policy_neg_raw = num_neg
-        else:
-            num_policy_neg_behavior = int(
-                round(num_neg * behavior_neg_ratio / (raw_neg_ratio + behavior_neg_ratio))
-            )
-            num_policy_neg_behavior = max(1, min(num_neg - 1, num_policy_neg_behavior))
-            num_policy_neg_raw = num_neg - num_policy_neg_behavior
-
-        rng, behavior_noise_rng, policy_x_noise_rng, policy_neg_raw_noise_rng, pos_rng, sample_pos_rng, behavior_neg_rng, mse_rng = jax.random.split(rng, 8)
+        rng, behavior_noise_rng, policy_x_noise_rng, pos_rng, uniform_neg_rng, mse_rng = jax.random.split(
+            rng, 6
+        )
 
         # =========================
         # 1) Behavior actor loss:
         # positives = dataset action only (one positive)
         # =========================
-        behavior_noises = jax.random.normal(behavior_noise_rng, (batch_size, num_neg, action_dim))
-        obs_repeat = jnp.repeat(batch['observations'][:, None, ...], num_neg, axis=1)
-        obs_flat = obs_repeat.reshape((batch_size * num_neg, *batch['observations'].shape[1:]))
-        behavior_noises_flat = behavior_noises.reshape((batch_size * num_neg, action_dim))
+        behavior_noises = jax.random.normal(
+            behavior_noise_rng, (batch_size, behavior_num_neg, action_dim)
+        )
+        behavior_obs_repeat = jnp.repeat(
+            batch['observations'][:, None, ...], behavior_num_neg, axis=1
+        )
+        behavior_obs_flat = behavior_obs_repeat.reshape(
+            (batch_size * behavior_num_neg, *batch['observations'].shape[1:])
+        )
+        behavior_noises_flat = behavior_noises.reshape((batch_size * behavior_num_neg, action_dim))
 
         raw_behavior_actions_flat = self.network.select('actor_behavior_onestep_flow')(
-            obs_flat, behavior_noises_flat, params=grad_params
+            behavior_obs_flat, behavior_noises_flat, params=grad_params
         )
-        raw_behavior_actions = raw_behavior_actions_flat.reshape((batch_size, num_neg, action_dim))
+        raw_behavior_actions = raw_behavior_actions_flat.reshape(
+            (batch_size, behavior_num_neg, action_dim)
+        )
         behavior_pos_actions = batch['actions'][:, None, :]
-        behavior_drift_loss = drifting_loss(
+        behavior_drift_loss = multi_temp_drifting_loss(
             raw_behavior_actions,
             behavior_pos_actions,
             raw_behavior_actions,
-            temp=self.config['behavior_drift_temp'],
+            temps=drift_temps,
             exclude_self_neg=True,
         )
 
         # =========================
         # 2) Policy actor loss:
-        # positives are sampled from behavior-generated candidates by exp(Q) probabilities
+        # positives are top-Q behavior-generated candidates
+        # negatives are 32 self-generated + 16 uniformly sampled actions
         # =========================
-        policy_x_noises = jax.random.normal(policy_x_noise_rng, (batch_size, num_neg, action_dim))
-        policy_x_noises_flat = policy_x_noises.reshape((batch_size * num_neg, action_dim))
-        raw_policy_actions_flat = self.network.select('actor_onestep_flow')(
-            obs_flat, policy_x_noises_flat, params=grad_params
+        policy_neg_obs_repeat = jnp.repeat(
+            batch['observations'][:, None, ...], policy_num_neg, axis=1
         )
-        raw_policy_actions = raw_policy_actions_flat.reshape((batch_size, num_neg, action_dim))
+        policy_neg_obs_flat = policy_neg_obs_repeat.reshape(
+            (batch_size * policy_num_neg, *batch['observations'].shape[1:])
+        )
+        policy_x_noises = jax.random.normal(policy_x_noise_rng, (batch_size, policy_num_neg, action_dim))
+        policy_x_noises_flat = policy_x_noises.reshape((batch_size * policy_num_neg, action_dim))
+        raw_policy_actions_flat = self.network.select('actor_onestep_flow')(
+            policy_neg_obs_flat, policy_x_noises_flat, params=grad_params
+        )
+        raw_policy_actions = raw_policy_actions_flat.reshape((batch_size, policy_num_neg, action_dim))
+        raw_policy_neg_actions = jnp.clip(raw_policy_actions, -1, 1)
 
         # Candidate positives are generated by behavior actor.
-        pos_noises = jax.random.normal(pos_rng, (batch_size, num_pos_samples, action_dim))
-        pos_obs_repeat = jnp.repeat(batch['observations'][:, None, ...], num_pos_samples, axis=1)
-        pos_obs_flat = pos_obs_repeat.reshape((batch_size * num_pos_samples, *batch['observations'].shape[1:]))
-        pos_noises_flat = pos_noises.reshape((batch_size * num_pos_samples, action_dim))
+        pos_noises = jax.random.normal(pos_rng, (batch_size, policy_pos_candidates, action_dim))
+        pos_obs_repeat = jnp.repeat(
+            batch['observations'][:, None, ...], policy_pos_candidates, axis=1
+        )
+        pos_obs_flat = pos_obs_repeat.reshape(
+            (batch_size * policy_pos_candidates, *batch['observations'].shape[1:])
+        )
+        pos_noises_flat = pos_noises.reshape((batch_size * policy_pos_candidates, action_dim))
 
         behavior_pos_actions_flat = self.network.select('actor_behavior_onestep_flow')(
             pos_obs_flat, pos_noises_flat, params=grad_params
         )
         behavior_pos_actions_flat = jnp.clip(behavior_pos_actions_flat, -1, 1)
-        behavior_pos_actions = behavior_pos_actions_flat.reshape((batch_size, num_pos_samples, action_dim))
+        behavior_pos_actions = behavior_pos_actions_flat.reshape(
+            (batch_size, policy_pos_candidates, action_dim)
+        )
 
         behavior_pos_qs = self.network.select('critic')(pos_obs_flat, actions=behavior_pos_actions_flat)
         if self.config['q_agg'] == 'min':
             behavior_pos_q = behavior_pos_qs.min(axis=0)
         else:
             behavior_pos_q = behavior_pos_qs.mean(axis=0)
-        behavior_pos_q = behavior_pos_q.reshape((batch_size, num_pos_samples))
+        behavior_pos_q = behavior_pos_q.reshape((batch_size, policy_pos_candidates))
         behavior_pos_q = jax.lax.stop_gradient(behavior_pos_q)
 
-        # Build sampling distribution with state-wise scaled exp(Q).
-        # Each state uses its own lambda over the num_pos_samples axis.
-        lam = jax.lax.stop_gradient(
-            1.0 / (jnp.abs(behavior_pos_q).mean(axis=1, keepdims=True) + 1e-8)
-        )
-        behavior_pos_q_scaled = behavior_pos_q * lam
-        pos_probs = jax.nn.softmax(behavior_pos_q_scaled / self.config['pos_prob_temp'], axis=1)
-        pos_probs = jax.lax.stop_gradient(pos_probs)
-
-        sample_keys = jax.random.split(sample_pos_rng, batch_size)
-
-        def _sample_indices(k, p):
-            return jax.random.choice(k, a=p.shape[0], shape=(pos_draws,), replace=False, p=p)
-
-        pos_idx = jax.vmap(_sample_indices)(sample_keys, pos_probs)  # [B, K]
+        # Keep top-k Q behavior actions as policy positives.
+        pos_topk = min(policy_num_pos, policy_pos_candidates)
+        top_pos_q, pos_idx = jax.lax.top_k(behavior_pos_q, pos_topk)
         pos_idx_expanded = jnp.expand_dims(pos_idx, axis=-1)
         pos_idx_expanded = jnp.repeat(pos_idx_expanded, action_dim, axis=-1)
         policy_pos_actions = jnp.take_along_axis(behavior_pos_actions, pos_idx_expanded, axis=1)
 
-        # Policy negatives mix raw-policy samples and behavior-generated samples.
-        policy_neg_raw_noises = jax.random.normal(
-            policy_neg_raw_noise_rng, (batch_size, num_policy_neg_raw, action_dim)
+        # Policy negatives = self-generated + uniform actions.
+        uniform_policy_neg_actions = jax.random.uniform(
+            uniform_neg_rng,
+            (batch_size, policy_num_uniform_neg, action_dim),
+            minval=-1.0,
+            maxval=1.0,
         )
-        policy_neg_raw_obs_repeat = jnp.repeat(
-            batch['observations'][:, None, ...], num_policy_neg_raw, axis=1
-        )
-        policy_neg_raw_obs_flat = policy_neg_raw_obs_repeat.reshape(
-            (batch_size * num_policy_neg_raw, *batch['observations'].shape[1:])
-        )
-        policy_neg_raw_noises_flat = policy_neg_raw_noises.reshape(
-            (batch_size * num_policy_neg_raw, action_dim)
-        )
-        raw_policy_neg_actions_flat = self.network.select('actor_onestep_flow')(
-            policy_neg_raw_obs_flat, policy_neg_raw_noises_flat, params=grad_params
-        )
-        raw_policy_neg_actions_flat = jnp.clip(raw_policy_neg_actions_flat, -1, 1)
-        raw_policy_neg_actions = raw_policy_neg_actions_flat.reshape(
-            (batch_size, num_policy_neg_raw, action_dim)
+        policy_neg_actions = jnp.concatenate(
+            [raw_policy_neg_actions, uniform_policy_neg_actions], axis=1
         )
 
-        if num_policy_neg_behavior > 0:
-            behavior_neg_noises = jax.random.normal(
-                behavior_neg_rng, (batch_size, num_policy_neg_behavior, action_dim)
-            )
-            behavior_neg_obs_repeat = jnp.repeat(
-                batch['observations'][:, None, ...], num_policy_neg_behavior, axis=1
-            )
-            behavior_neg_obs_flat = behavior_neg_obs_repeat.reshape(
-                (batch_size * num_policy_neg_behavior, *batch['observations'].shape[1:])
-            )
-            behavior_neg_noises_flat = behavior_neg_noises.reshape(
-                (batch_size * num_policy_neg_behavior, action_dim)
-            )
-            behavior_neg_actions_flat = self.network.select('actor_behavior_onestep_flow')(
-                behavior_neg_obs_flat, behavior_neg_noises_flat, params=grad_params
-            )
-            behavior_neg_actions_flat = jnp.clip(behavior_neg_actions_flat, -1, 1)
-            behavior_neg_actions = behavior_neg_actions_flat.reshape(
-                (batch_size, num_policy_neg_behavior, action_dim)
-            )
-            policy_neg_actions = jnp.concatenate(
-                [raw_policy_neg_actions, behavior_neg_actions], axis=1
-            )
-        else:
-            policy_neg_actions = raw_policy_neg_actions
-
-        policy_drift_loss = drifting_loss(
+        policy_drift_loss = multi_temp_drifting_loss(
             raw_policy_actions,
             policy_pos_actions,
             policy_neg_actions,
-            temp=self.config['actor_drift_temp'],
+            temps=drift_temps,
+            exclude_self_neg=True,
         )
 
         # Total actor loss: train both actors together.
@@ -282,15 +270,10 @@ class CDPV3Agent(flax.struct.PyTreeNode):
             'drift_batch_loss': behavior_drift_loss,  # backward-compatible key
             'drift_prob_loss': policy_drift_loss,  # backward-compatible key
             'pos_q': behavior_pos_q.mean(),
-            'pos_q_sampled': jnp.take_along_axis(behavior_pos_q, pos_idx, axis=1).mean(),
-            'pos_q_scaled': behavior_pos_q_scaled.mean(),
-            'pos_q_scaled_sampled': jnp.take_along_axis(behavior_pos_q_scaled, pos_idx, axis=1).mean(),
-            'lam_mean': lam.mean(),
-            'lam_min': lam.min(),
-            'lam_max': lam.max(),
-            'policy_neg_raw_count': jnp.asarray(num_policy_neg_raw),
-            'policy_neg_behavior_count': jnp.asarray(num_policy_neg_behavior),
-            'pos_entropy': (-pos_probs * jnp.log(pos_probs + 1e-12)).sum(axis=1).mean(),
+            'pos_q_sampled': top_pos_q.mean(),
+            'policy_neg_raw_count': jnp.asarray(policy_num_neg),
+            'policy_neg_uniform_count': jnp.asarray(policy_num_uniform_neg),
+            'policy_neg_behavior_count': jnp.asarray(0),  # backward-compatible key
             'mse': mse,
         }
 
@@ -460,16 +443,22 @@ def get_config():
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
             q_agg='min',  # Aggregation method for target Q values.\
-            behavior_drift_temp=50.0,  # Drift temperature for behavior actor.
-            actor_drift_temp=5.0,  # Drift temperature for policy actor.
+            drift_temps=(0.1, 5.0, 100.0),  # Multi-temperature drift loss (summed over all temps).
             drift_batch_weight=1.0,  # Weight of behavior-actor drifting loss (single dataset positive).
-            drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (sampled behavior positives).
-            num_neg=16,  # Number of negative/generated samples per state (same for both actors).
-            num_samples=16,  # Number of behavior-actor candidate positives for policy actor.
-            pos_topk=4,  # Number of sampled positives drawn from exp(Q) distribution.
-            pos_prob_temp=0.001,  # Temperature for exp(Q) sampling probabilities.
-            policy_neg_raw_ratio=4.0,  # Policy-neg mix ratio numerator for raw policy actions.
-            policy_neg_behavior_ratio=1.0,  # Policy-neg mix ratio numerator for behavior actions.
+            drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (top-Q behavior positives).
+            behavior_num_neg=16,  # Number of generated negatives for behavior drifting.
+            policy_pos_candidates=64,  # Number of behavior-generated candidate positives.
+            policy_num_pos=16,  # Number of top-Q behavior positives used by policy drifting.
+            policy_num_neg=32,  # Number of policy self-generated negatives.
+            policy_num_uniform_neg=16,  # Number of uniformly sampled negatives.
+            behavior_drift_temp=50.0,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
+            actor_drift_temp=5.0,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
+            num_neg=16,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
+            num_samples=16,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
+            pos_topk=4,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
+            pos_prob_temp=0.001,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
+            policy_neg_raw_ratio=4.0,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
+            policy_neg_behavior_ratio=1.0,  # Deprecated/unused in cdp_v3 actor loss (kept for CLI compatibility).
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )
