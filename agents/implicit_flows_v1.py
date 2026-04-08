@@ -50,7 +50,7 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             jnp.expand_dims(batch['rewards'], axis=-1)
             + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_returns
         )
-        noises = jax.random.normal(ret_rng, (batch_size, 1))
+        noises = jax.random.normal(noise_rng, (batch_size, 1))
         bcfm_noisy_returns = times * returns + (1 - times) * noises
         bcfm_target_vector_field = returns - noises
         bcfm_vector_field1 = self.network.select('critic_flow1')(
@@ -71,11 +71,11 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         r_noises = noises - self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * bcfm_noises
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
 
-        next_vector_field1 = self.network.select('target_critic_flow1')(
-            noisy_next_returns, times, batch['next_observations'], next_actions
+        next_vector_field1 = self.network.select('critic_flow1')(
+            noisy_next_returns, times, batch['next_observations'], next_actions, params=grad_params
         )
-        next_vector_field2 = self.network.select('target_critic_flow2')(
-            noisy_next_returns, times, batch['next_observations'], next_actions
+        next_vector_field2 = self.network.select('critic_flow2')(
+            noisy_next_returns, times, batch['next_observations'], next_actions, params=grad_params
         )
 
         mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
@@ -123,9 +123,6 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
 
         return critic_loss, {
             'critic_loss': critic_loss,
-            'bcfm_loss': bcfm_loss,
-            'dcfm_loss': dcfm_loss,
-            'implicit_loss': dcfm_loss,  # backward-compatible key
             'q_mean': q.mean(),
             'q_max': q.max(),
             'q_min': q.min(),
@@ -506,27 +503,12 @@ def get_config():
             q_agg='min',
             clip_flow_actions=True,
             clip_flow_returns=True,
-            addq_low_threshold=0.75,
-            addq_high_threshold=1.25,
-            addq_beta_low=0.25,
-            addq_beta_mid=0.5,
-            addq_beta_high=0.75,
-            addq_eps=1e-8,
-            num_samples=16,
-            num_flow_steps=10,
+            num_samples=8,
+            num_flow_steps=8,
             normalize_q_loss=True,
             bcfm_lambda=1.0,  # Bootstrapped conditional flow-matching weight.
             dcfm_lambda=1.0,  # Dynamic conditional flow-matching (implicit) weight.
-            confidence_weight_temp=0.3,  # Deprecated/unused in critic loss.
-            ot_weight_temp=1.0,  # Deprecated/unused in critic loss.
-            next_return_gaussian_mean=0.0,  # Gaussian mean for t=0 next-return clipping anchor.
-            next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
-            next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.
-            next_return_clip_slack=0.05,  # Relaxation margin for lower/upper clipping bounds.
-            alpha_softmax_temp=2.0,  # Deprecated/unused (alpha-weighted next-return mixing removed).
-            disagreement_softplus_scale=5.0,  # Deprecated/unused (disagreement hard/soft mixing removed).
-            actor_behavior_weight_temp=3.0,  # Temperature for exp(temp * q_scaled) actor behavior weights.
-            alpha=10.0,  # Deprecated/unused (one-step distillation removed).
+            alpha=10.0,  # Flow distillation coefficient.
             encoder=ml_collections.config_dict.placeholder(str),
         )
     )
