@@ -67,8 +67,9 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         # DCFM: reward-vector regression on top of BCFM vector fields.
         # Use linear interpolation between next_returns and bcfm noise
         # instead of compute_flow_returns(..., end_times=times).
-        noisy_next_returns = times * next_returns + (1 - times) * bcfm_noises
-        r_noises = noises - self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * bcfm_noises
+        next_noises = jax.random.normal(ret_rng, (batch_size, 1))
+        noisy_next_returns = times * next_returns + (1 - times) * next_noises
+        r_noises = noises - self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_noises
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
 
         next_vector_field1 = self.network.select('critic_flow1')(
