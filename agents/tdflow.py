@@ -1,0 +1,633 @@
+from functools import partial
+from typing import Any
+
+import flax
+import jax
+import jax.numpy as jnp
+import ml_collections
+import optax
+
+from utils.encoders import encoder_modules
+from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
+from utils.networks import ActorVectorField, Value, ValueVectorField
+
+
+class TDFlowsV1Agent(flax.struct.PyTreeNode):
+    """TD-Flows agent with source critic driven return noise."""
+
+    rng: Any
+    network: Any
+    config: Any = nonpytree_field()
+
+    def source_critic_stats(self, observations, actions, params=None):
+        """Return source-critic mean/std/var for p(noise | s, a)."""
+        source_out = self.network.select('source_critic')(observations, actions, params=params)
+        source_mean = source_out[..., :1]
+        source_log_std = jnp.clip(
+            source_out[..., 1:2],
+            self.config['source_critic_log_std_min'],
+            self.config['source_critic_log_std_max'],
+        )
+        source_std = jnp.exp(source_log_std)
+        source_var = source_std ** 2
+        return source_mean, source_std, source_var
+
+    def sample_source_noises(self, observations, actions, rng, params=None):
+        """Sample return noise from source critic via reparameterization."""
+        source_mean, source_std, _ = self.source_critic_stats(observations, actions, params=params)
+        eps = jax.random.normal(rng, source_mean.shape)
+        return source_mean + source_std * eps
+
+    def source_critic_moment_loss(self, batch, grad_params, rng):
+        """Fit source critic with Gaussian NLL on Bellman target samples."""
+        num_samples = self.config['source_critic_num_samples']
+        _, actor_rng, noise_rng = jax.random.split(rng, 3)
+
+        next_actions = jax.lax.stop_gradient(self.sample_actions(batch['next_observations'], actor_rng))
+        n_next_observations = jnp.repeat(
+            jnp.expand_dims(batch['next_observations'], -2),
+            num_samples,
+            axis=-2,
+        )
+        n_next_actions = jnp.repeat(
+            jnp.expand_dims(next_actions, -2),
+            num_samples,
+            axis=-2,
+        )
+
+        sampled_noises = jax.lax.stop_gradient(
+            self.sample_source_noises(n_next_observations, n_next_actions, noise_rng, params=grad_params)
+        )
+        sampled_zbar1 = self.compute_flow_returns(
+            sampled_noises,
+            n_next_observations,
+            n_next_actions,
+            flow_network_name='target_critic_flow1',
+        )
+        sampled_zbar2 = self.compute_flow_returns(
+            sampled_noises,
+            n_next_observations,
+            n_next_actions,
+            flow_network_name='target_critic_flow2',
+        )
+        if self.config['ret_agg'] == 'min':
+            sampled_zbar = jnp.minimum(sampled_zbar1, sampled_zbar2)
+        else:
+            sampled_zbar = (sampled_zbar1 + sampled_zbar2) / 2
+
+        rewards = jnp.reshape(batch['rewards'], (batch['rewards'].shape[0], 1))
+        masks = jnp.reshape(batch['masks'], (batch['masks'].shape[0], 1))
+        bellman_targets = jax.lax.stop_gradient(
+            rewards[:, None, :]
+            + self.config['discount'] * masks[:, None, :] * sampled_zbar
+        )
+
+        source_mean, source_std, source_var = self.source_critic_stats(
+            batch['observations'], batch['actions'], params=grad_params
+        )
+        source_mean = source_mean[:, None, :]
+        source_var = source_var[:, None, :]
+
+        source_critic_loss = (
+            ((bellman_targets - source_mean) ** 2) / (2.0 * source_var)
+            + 0.5 * jnp.log(source_var)
+        ).mean()
+
+        return source_critic_loss, {
+            'source_critic_loss': source_critic_loss,
+            'source_target_mean': bellman_targets.mean(),
+            'source_target_std': bellman_targets.std(),
+            'source_pred_mean': source_mean.mean(),
+            'source_pred_std': source_std.mean(),
+        }
+
+    def critic_loss(self, batch, grad_params, rng):
+        """Compute critic loss with BCFM + source-critic moment matching."""
+        batch_size = batch['actions'].shape[0]
+        rng, actor_rng, next_noise_rng, noise_rng, time_rng, q_rng, source_rng = jax.random.split(rng, 7)
+
+        next_actions = self.sample_actions(batch['next_observations'], actor_rng, policy_extraction='rpg')
+        times = jax.random.uniform(time_rng, (batch_size, 1))
+
+        bcfm_noises = jax.lax.stop_gradient(
+            self.sample_source_noises(
+                batch['next_observations'],
+                next_actions,
+                next_noise_rng,
+                params=grad_params,
+            )
+        )
+        next_returns1 = self.compute_flow_returns(
+            bcfm_noises,
+            batch['next_observations'],
+            next_actions,
+            flow_network_name='target_critic_flow1',
+        )
+        next_returns2 = self.compute_flow_returns(
+            bcfm_noises,
+            batch['next_observations'],
+            next_actions,
+            flow_network_name='target_critic_flow2',
+        )
+        if self.config['ret_agg'] == 'min':
+            next_returns = jnp.minimum(next_returns1, next_returns2)
+        else:
+            next_returns = (next_returns1 + next_returns2) / 2
+
+        returns = (
+            jnp.expand_dims(batch['rewards'], axis=-1)
+            + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_returns
+        )
+        noises = jax.lax.stop_gradient(
+            self.sample_source_noises(
+                batch['observations'],
+                batch['actions'],
+                noise_rng,
+                params=grad_params,
+            )
+        )
+        bcfm_noisy_returns = times * returns + (1 - times) * noises
+        bcfm_target_vector_field = returns - noises
+        bcfm_vector_field1 = self.network.select('critic_flow1')(
+            bcfm_noisy_returns,
+            times,
+            batch['observations'],
+            batch['actions'],
+            params=grad_params,
+        )
+        bcfm_vector_field2 = self.network.select('critic_flow2')(
+            bcfm_noisy_returns,
+            times,
+            batch['observations'],
+            batch['actions'],
+            params=grad_params,
+        )
+        bcfm_loss = (
+            (bcfm_vector_field1 - bcfm_target_vector_field) ** 2
+            + (bcfm_vector_field2 - bcfm_target_vector_field) ** 2
+        ).mean(axis=-1)
+
+        source_critic_loss, source_info = self.source_critic_moment_loss(batch, grad_params, source_rng)
+        critic_loss = (
+            self.config['bcfm_lambda'] * bcfm_loss.mean()
+            + self.config['source_critic_lambda'] * source_critic_loss
+        )
+
+        q_noises = jax.lax.stop_gradient(
+            self.sample_source_noises(
+                batch['observations'],
+                batch['actions'],
+                q_rng,
+                params=grad_params,
+            )
+        )
+        q1 = (
+            q_noises
+            + self.network.select('critic_flow1')(
+                q_noises,
+                jnp.zeros_like(q_noises),
+                batch['observations'],
+                batch['actions'],
+                params=grad_params,
+            )
+        ).squeeze(-1)
+        q2 = (
+            q_noises
+            + self.network.select('critic_flow2')(
+                q_noises,
+                jnp.zeros_like(q_noises),
+                batch['observations'],
+                batch['actions'],
+                params=grad_params,
+            )
+        ).squeeze(-1)
+        if self.config['clip_flow_returns']:
+            q1 = jnp.clip(
+                q1,
+                self.config['min_reward'] / (1 - self.config['discount']),
+                self.config['max_reward'] / (1 - self.config['discount']),
+            )
+            q2 = jnp.clip(
+                q2,
+                self.config['min_reward'] / (1 - self.config['discount']),
+                self.config['max_reward'] / (1 - self.config['discount']),
+            )
+        if self.config['q_agg'] == 'min':
+            q = jnp.minimum(q1, q2)
+        else:
+            q = (q1 + q2) / 2
+
+        return critic_loss, {
+            'critic_loss': critic_loss,
+            'bcfm_loss': bcfm_loss.mean(),
+            'q_mean': q.mean(),
+            'q_max': q.max(),
+            'q_min': q.min(),
+            **source_info,
+        }
+
+    def actor_loss(self, batch, grad_params, rng):
+        """Compute BC-flow + distillation + FQL-style policy improvement loss."""
+        batch_size, action_dim = batch['actions'].shape
+        rng, x_rng, t_rng, actor_rng = jax.random.split(rng, 4)
+
+        x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
+        x_1 = batch['actions']
+        t = jax.random.uniform(t_rng, (batch_size, 1))
+        x_t = (1 - t) * x_0 + t * x_1
+        vel = x_1 - x_0
+
+        pred = self.network.select('actor_flow')(batch['observations'], x_t, t, params=grad_params)
+        bc_flow_loss = jnp.mean((pred - vel) ** 2)
+
+        noises = jax.random.normal(actor_rng, (batch_size, action_dim))
+        target_flow_actions = self.compute_flow_actions(noises, batch['observations'])
+        actor_actions = self.network.select('actor_onestep_flow')(
+            batch['observations'], noises, params=grad_params
+        )
+        actor_actions = jnp.clip(actor_actions, -1, 1)
+        distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
+
+        source_q_mean, _, _ = self.source_critic_stats(
+            batch['observations'],
+            actor_actions,
+        )
+        q = source_q_mean.squeeze(-1)
+        if self.config['clip_flow_returns']:
+            q = jnp.clip(
+                q,
+                self.config['min_reward'] / (1 - self.config['discount']),
+                self.config['max_reward'] / (1 - self.config['discount']),
+            )
+
+        q_loss = -q.mean()
+        if self.config['normalize_q_loss']:
+            lam = jax.lax.stop_gradient(1 / jnp.abs(q).mean())
+            q_loss = lam * q_loss
+
+        actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss + q_loss
+
+        actions = self.sample_actions(batch['observations'], seed=rng)
+        mse = jnp.mean((actions - batch['actions']) ** 2)
+
+        return actor_loss, {
+            'actor_loss': actor_loss,
+            'bc_flow_loss': bc_flow_loss,
+            'distill_loss': distill_loss,
+            'q_loss': q_loss,
+            'q': q.mean(),
+            'mse': mse,
+        }
+
+    @jax.jit
+    def total_loss(self, batch, grad_params, rng=None):
+        """Compute total loss."""
+        info = {}
+        rng = rng if rng is not None else self.rng
+        rng, critic_rng, actor_rng = jax.random.split(rng, 3)
+
+        critic_loss, critic_info = self.critic_loss(batch, grad_params, critic_rng)
+        for k, v in critic_info.items():
+            info[f'critic/{k}'] = v
+
+        actor_loss, actor_info = self.actor_loss(batch, grad_params, actor_rng)
+        for k, v in actor_info.items():
+            info[f'actor/{k}'] = v
+
+        loss = critic_loss + actor_loss
+        return loss, info
+
+    def target_update(self, network, module_name):
+        """Update target network."""
+        new_target_params = jax.tree_util.tree_map(
+            lambda p, tp: p * self.config['tau'] + tp * (1 - self.config['tau']),
+            self.network.params[f'modules_{module_name}'],
+            self.network.params[f'modules_target_{module_name}'],
+        )
+        network.params[f'modules_target_{module_name}'] = new_target_params
+
+    @jax.jit
+    def update(self, batch):
+        """Update the agent and return info."""
+        new_rng, rng = jax.random.split(self.rng)
+
+        def loss_fn(grad_params):
+            return self.total_loss(batch, grad_params, rng=rng)
+
+        new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
+        self.target_update(new_network, 'critic_flow1')
+        self.target_update(new_network, 'critic_flow2')
+
+        return self.replace(network=new_network, rng=new_rng), info
+
+    @partial(jax.jit, static_argnames=('flow_network_name', 'return_jac_eps_prod'))
+    def compute_flow_returns(
+        self,
+        noises,
+        observations,
+        actions,
+        init_times=None,
+        end_times=None,
+        flow_network_name='critic_flow',
+        return_jac_eps_prod=False,
+        params=None,
+    ):
+        """Compute returns from return flow with Euler integration."""
+        noisy_returns = noises
+        if init_times is None:
+            init_times = jnp.zeros((*noisy_returns.shape[:-1], 1), dtype=noisy_returns.dtype)
+        if end_times is None:
+            end_times = jnp.ones((*noisy_returns.shape[:-1], 1), dtype=noisy_returns.dtype)
+        step_size = (end_times - init_times) / self.config['num_flow_steps']
+
+        def func(carry, i):
+            (cur_noisy_returns,) = carry
+
+            times = i * step_size + init_times
+            vector_field = self.network.select(flow_network_name)(
+                cur_noisy_returns,
+                times,
+                observations,
+                actions,
+                params=params,
+            )
+
+            new_noisy_returns = cur_noisy_returns + step_size * vector_field
+            if self.config['clip_flow_returns']:
+                new_noisy_returns = jnp.clip(
+                    new_noisy_returns,
+                    self.config['min_reward'] / (1 - self.config['discount']),
+                    self.config['max_reward'] / (1 - self.config['discount']),
+                )
+
+            return (new_noisy_returns,), None
+
+        (noisy_returns,), _ = jax.lax.scan(
+            func,
+            (noisy_returns,),
+            jnp.arange(self.config['num_flow_steps']),
+        )
+
+        if return_jac_eps_prod:
+            return noisy_returns, jnp.ones_like(noisy_returns)
+        return noisy_returns
+
+    @jax.jit
+    def compute_flow_actions(
+        self,
+        noises,
+        observations,
+        params=None,
+        init_times=None,
+        end_times=None,
+    ):
+        """Compute actions from BC flow with Euler integration."""
+        noisy_actions = noises
+        if init_times is None:
+            init_times = jnp.zeros((*noisy_actions.shape[:-1], 1), dtype=noisy_actions.dtype)
+        if end_times is None:
+            end_times = jnp.ones((*noisy_actions.shape[:-1], 1), dtype=noisy_actions.dtype)
+        step_size = (end_times - init_times) / self.config['num_flow_steps']
+
+        def func(carry, i):
+            (cur_noisy_actions,) = carry
+
+            times = i * step_size + init_times
+            vector_field = self.network.select('actor_flow')(
+                observations, cur_noisy_actions, times, params=params
+            )
+            new_noisy_actions = cur_noisy_actions + vector_field * step_size
+            if self.config['clip_flow_actions']:
+                new_noisy_actions = jnp.clip(new_noisy_actions, -1, 1)
+
+            return (new_noisy_actions,), None
+
+        (noisy_actions,), _ = jax.lax.scan(
+            func,
+            (noisy_actions,),
+            jnp.arange(self.config['num_flow_steps']),
+        )
+
+        if not self.config['clip_flow_actions']:
+            noisy_actions = jnp.clip(noisy_actions, -1, 1)
+        return noisy_actions
+
+    @partial(jax.jit, static_argnames=('policy_extraction'))
+    def sample_actions(
+        self,
+        observations,
+        seed=None,
+        temperature=1.0,
+        policy_extraction='rs',
+    ):
+        """Sample actions using rejection sampling."""
+        del temperature
+        action_seed, q_seed = jax.random.split(seed)
+
+        if policy_extraction == 'rs':
+            actor_noises = jax.random.normal(
+                action_seed,
+                (
+                    *observations.shape[:-len(self.config['ob_dims'])],
+                    self.config['num_samples'],
+                    self.config['action_dim'],
+                ),
+            )
+            n_observations = jnp.repeat(
+                jnp.expand_dims(observations, -2),
+                self.config['num_samples'],
+                axis=-2,
+            )
+            flow_actions = self.compute_flow_actions(actor_noises, n_observations)
+
+            q_noises = self.sample_source_noises(n_observations, flow_actions, q_seed)
+            q1 = (
+                q_noises
+                + self.network.select('critic_flow1')(
+                    q_noises,
+                    jnp.zeros_like(q_noises),
+                    n_observations,
+                    flow_actions,
+                )
+            ).squeeze(-1)
+            q2 = (
+                q_noises
+                + self.network.select('critic_flow2')(
+                    q_noises,
+                    jnp.zeros_like(q_noises),
+                    n_observations,
+                    flow_actions,
+                )
+            ).squeeze(-1)
+            if self.config['clip_flow_returns']:
+                q1 = jnp.clip(
+                    q1,
+                    self.config['min_reward'] / (1 - self.config['discount']),
+                    self.config['max_reward'] / (1 - self.config['discount']),
+                )
+                q2 = jnp.clip(
+                    q2,
+                    self.config['min_reward'] / (1 - self.config['discount']),
+                    self.config['max_reward'] / (1 - self.config['discount']),
+                )
+            if self.config['q_agg'] == 'min':
+                q = jnp.minimum(q1, q2)
+            else:
+                q = (q1 + q2) / 2
+
+            if len(q.shape) > 1:
+                actions = flow_actions[jnp.arange(q.shape[0]), jnp.argmax(q, axis=-1)]
+            else:
+                actions = flow_actions[jnp.argmax(q, axis=-1)]
+        elif policy_extraction == 'rpg':
+            actor_noises = jax.random.normal(
+                action_seed,
+                (*observations.shape[:-len(self.config['ob_dims'])], self.config['action_dim']),
+            )
+            actions = self.network.select('actor_onestep_flow')(observations, actor_noises)
+            actions = jnp.clip(actions, -1, 1)
+        else:
+            raise ValueError(f'Unsupported policy_extraction: {policy_extraction}')
+
+        return actions
+
+    @classmethod
+    def create(
+        cls,
+        seed,
+        example_batch,
+        config,
+    ):
+        """Create a new agent."""
+        rng = jax.random.PRNGKey(seed)
+        rng, init_rng = jax.random.split(rng, 2)
+
+        ex_observations = example_batch['observations']
+        ex_actions = example_batch['actions']
+        ex_returns = ex_actions[..., :1]
+        ex_times = ex_actions[..., :1]
+        ob_dims = ex_observations.shape[1:]
+        action_dim = ex_actions.shape[-1]
+        min_reward = example_batch['min_reward']
+        max_reward = example_batch['max_reward']
+
+        encoders = dict()
+        if config['encoder'] is not None:
+            encoder_module = encoder_modules[config['encoder']]
+            encoders['critic_flow'] = encoder_module()
+            encoders['target_critic_flow'] = encoder_module()
+            encoders['source_critic'] = encoder_module()
+            encoders['actor_flow'] = encoder_module()
+            encoders['actor_onestep_flow'] = encoder_module()
+
+        critic_flow1_def = ValueVectorField(
+            hidden_dims=config['value_hidden_dims'],
+            layer_norm=config['value_layer_norm'],
+            num_ensembles=1,
+            encoder=encoders.get('critic_flow'),
+        )
+        critic_flow2_def = ValueVectorField(
+            hidden_dims=config['value_hidden_dims'],
+            layer_norm=config['value_layer_norm'],
+            num_ensembles=1,
+            encoder=encoders.get('critic_flow'),
+        )
+        target_critic_flow1_def = ValueVectorField(
+            hidden_dims=config['value_hidden_dims'],
+            layer_norm=config['value_layer_norm'],
+            num_ensembles=1,
+            encoder=encoders.get('target_critic_flow'),
+        )
+        target_critic_flow2_def = ValueVectorField(
+            hidden_dims=config['value_hidden_dims'],
+            layer_norm=config['value_layer_norm'],
+            num_ensembles=1,
+            encoder=encoders.get('target_critic_flow'),
+        )
+        source_critic_def = Value(
+            hidden_dims=config['value_hidden_dims'],
+            value_dim=2,
+            layer_norm=config['value_layer_norm'],
+            num_ensembles=1,
+            encoder=encoders.get('source_critic'),
+        )
+        actor_flow_def = ActorVectorField(
+            hidden_dims=config['actor_hidden_dims'],
+            action_dim=action_dim,
+            layer_norm=config['actor_layer_norm'],
+            encoder=encoders.get('actor_flow'),
+        )
+        actor_onestep_flow_def = ActorVectorField(
+            hidden_dims=config['actor_hidden_dims'],
+            action_dim=action_dim,
+            layer_norm=config['actor_layer_norm'],
+            encoder=encoders.get('actor_onestep_flow'),
+        )
+
+        network_info = dict(
+            critic_flow1=(critic_flow1_def, (ex_returns, ex_times, ex_observations, ex_actions)),
+            critic_flow2=(critic_flow2_def, (ex_returns, ex_times, ex_observations, ex_actions)),
+            target_critic_flow1=(
+                target_critic_flow1_def,
+                (ex_returns, ex_times, ex_observations, ex_actions),
+            ),
+            target_critic_flow2=(
+                target_critic_flow2_def,
+                (ex_returns, ex_times, ex_observations, ex_actions),
+            ),
+            source_critic=(source_critic_def, (ex_observations, ex_actions)),
+            actor_flow=(actor_flow_def, (ex_observations, ex_actions, ex_times)),
+            actor_onestep_flow=(actor_onestep_flow_def, (ex_observations, ex_actions)),
+        )
+        networks = {k: v[0] for k, v in network_info.items()}
+        network_args = {k: v[1] for k, v in network_info.items()}
+
+        network_def = ModuleDict(networks)
+        network_tx = optax.adam(learning_rate=config['lr'])
+        network_params = network_def.init(init_rng, **network_args)['params']
+        network = TrainState.create(network_def, network_params, tx=network_tx)
+
+        params = network_params
+        params['modules_target_critic_flow1'] = params['modules_critic_flow1']
+        params['modules_target_critic_flow2'] = params['modules_critic_flow2']
+
+        config['ob_dims'] = ob_dims
+        config['action_dim'] = action_dim
+        config['min_reward'] = min_reward
+        config['max_reward'] = max_reward
+        return cls(rng, network=network, config=flax.core.FrozenDict(**config))
+
+
+def get_config():
+    config = ml_collections.ConfigDict(
+        dict(
+            agent_name='td_flows_v1',
+            ob_dims=ml_collections.config_dict.placeholder(list),
+            action_dim=ml_collections.config_dict.placeholder(int),
+            min_reward=ml_collections.config_dict.placeholder(float),
+            max_reward=ml_collections.config_dict.placeholder(float),
+            lr=3e-4,
+            batch_size=256,
+            actor_hidden_dims=(512, 512, 512, 512),
+            value_hidden_dims=(512, 512, 512, 512),
+            actor_layer_norm=True,
+            value_layer_norm=True,
+            discount=0.99,
+            tau=0.005,
+            ret_agg='mean',
+            q_agg='min',
+            clip_flow_actions=True,
+            clip_flow_returns=True,
+            num_samples=16,
+            num_flow_steps=10,
+            normalize_q_loss=True,
+            bcfm_lambda=1.0,
+            source_critic_lambda=1.0,
+            source_critic_num_samples=16,
+            source_critic_log_std_min=-5.0,
+            source_critic_log_std_max=2.0,
+            alpha=10.0,
+            encoder=ml_collections.config_dict.placeholder(str),
+        )
+    )
+    return config

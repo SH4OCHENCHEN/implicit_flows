@@ -16,6 +16,7 @@ from agents.iql import IQLAgent
 from agents.iqn import IQNAgent
 from agents.rebrac import ReBRACAgent
 from agents.sac import SACAgent
+from agents.tdflow import TDFlowsV1Agent
 from agents.value_flows import ValueFlowsAgent
 
 agents = dict(
@@ -37,5 +38,6 @@ agents = dict(
     iqn=IQNAgent,
     rebrac=ReBRACAgent,
     sac=SACAgent,
+    td_flows_v1=TDFlowsV1Agent,
     value_flows=ValueFlowsAgent,
 )
