@@ -12,7 +12,7 @@ from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value, ValueVectorField
 
 
-class TDFlowsV1Agent(flax.struct.PyTreeNode):
+class TDFlowsAgent(flax.struct.PyTreeNode):
     """TD-Flows agent with source critic driven return noise."""
 
     rng: Any
@@ -601,7 +601,7 @@ class TDFlowsV1Agent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='td_flows_v1',
+            agent_name='td_flows',
             ob_dims=ml_collections.config_dict.placeholder(list),
             action_dim=ml_collections.config_dict.placeholder(int),
             min_reward=ml_collections.config_dict.placeholder(float),
