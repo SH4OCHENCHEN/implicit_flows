@@ -9,7 +9,7 @@ import optax
 
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import ActorVectorField, Value, ValueVectorField
+from utils.networks import Actor, ActorVectorField, ValueVectorField
 
 
 class TDFlowsAgent(flax.struct.PyTreeNode):
@@ -19,16 +19,20 @@ class TDFlowsAgent(flax.struct.PyTreeNode):
     network: Any
     config: Any = nonpytree_field()
 
+    def make_source_critic_inputs(self, observations, actions):
+        """Flatten observations and concatenate actions for source critic input."""
+        obs_flat = jnp.reshape(
+            observations,
+            (*observations.shape[:-len(self.config['ob_dims'])], -1),
+        )
+        return jnp.concatenate([obs_flat, actions], axis=-1)
+
     def source_critic_stats(self, observations, actions, params=None):
         """Return source-critic mean/std/var for p(noise | s, a)."""
-        source_out = self.network.select('source_critic')(observations, actions, params=params)
-        source_mean = source_out[..., :1]
-        source_log_std = jnp.clip(
-            source_out[..., 1:2],
-            self.config['source_critic_log_std_min'],
-            self.config['source_critic_log_std_max'],
-        )
-        source_std = jnp.exp(source_log_std)
+        source_inputs = self.make_source_critic_inputs(observations, actions)
+        source_dist = self.network.select('source_critic')(source_inputs, params=params)
+        source_mean = source_dist.mean()
+        source_std = source_dist.stddev()
         source_var = source_std ** 2
         return source_mean, source_std, source_var
 
@@ -59,14 +63,14 @@ class TDFlowsAgent(flax.struct.PyTreeNode):
             sampled_noises,
             n_observations,
             n_actions,
-            flow_network_name='critic_flow1',
+            flow_network_name='target_critic_flow1',
             params=grad_params,
         )
         sampled_returns2 = self.compute_flow_returns(
             sampled_noises,
             n_observations,
             n_actions,
-            flow_network_name='critic_flow2',
+            flow_network_name='target_critic_flow2',
             params=grad_params,
         )
         if self.config['ret_agg'] == 'min':
@@ -498,6 +502,8 @@ class TDFlowsAgent(flax.struct.PyTreeNode):
 
         ex_observations = example_batch['observations']
         ex_actions = example_batch['actions']
+        ex_source_inputs = ex_observations.reshape((ex_observations.shape[0], -1))
+        ex_source_inputs = jnp.concatenate([ex_source_inputs, ex_actions], axis=-1)
         ex_returns = ex_actions[..., :1]
         ex_times = ex_actions[..., :1]
         ob_dims = ex_observations.shape[1:]
@@ -538,11 +544,15 @@ class TDFlowsAgent(flax.struct.PyTreeNode):
             num_ensembles=1,
             encoder=encoders.get('target_critic_flow'),
         )
-        source_critic_def = Value(
-            hidden_dims=config['value_hidden_dims'],
-            value_dim=2,
-            layer_norm=config['value_layer_norm'],
-            num_ensembles=1,
+        source_critic_def = Actor(
+            hidden_dims=config['source_critic_hidden_dims'],
+            action_dim=1,
+            layer_norm=config['source_critic_layer_norm'],
+            log_std_min=config['source_critic_log_std_min'],
+            log_std_max=config['source_critic_log_std_max'],
+            tanh_squash=False,
+            state_dependent_std=True,
+            const_std=False,
             encoder=encoders.get('source_critic'),
         )
         actor_flow_def = ActorVectorField(
@@ -569,7 +579,7 @@ class TDFlowsAgent(flax.struct.PyTreeNode):
                 target_critic_flow2_def,
                 (ex_returns, ex_times, ex_observations, ex_actions),
             ),
-            source_critic=(source_critic_def, (ex_observations, ex_actions)),
+            source_critic=(source_critic_def, (ex_source_inputs,)),
             actor_flow=(actor_flow_def, (ex_observations, ex_actions, ex_times)),
             actor_onestep_flow=(actor_onestep_flow_def, (ex_observations, ex_actions)),
         )
@@ -604,8 +614,10 @@ def get_config():
             batch_size=256,
             actor_hidden_dims=(512, 512, 512, 512),
             value_hidden_dims=(512, 512, 512, 512),
+            source_critic_hidden_dims=(512, 512, 512, 512),
             actor_layer_norm=True,
             value_layer_norm=True,
+            source_critic_layer_norm=True,
             discount=0.99,
             tau=0.005,
             ret_agg='mean',
@@ -619,7 +631,7 @@ def get_config():
             source_critic_lambda=1.0,
             source_critic_num_samples=16,
             source_critic_log_std_min=-5.0,
-            source_critic_log_std_max=5.0,
+            source_critic_log_std_max=1.0,
             alpha=10.0,
             encoder=ml_collections.config_dict.placeholder(str),
         )
