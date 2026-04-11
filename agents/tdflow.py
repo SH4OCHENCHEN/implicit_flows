@@ -39,66 +39,60 @@ class TDFlowsAgent(flax.struct.PyTreeNode):
         return source_mean + source_std * eps
 
     def source_critic_moment_loss(self, batch, grad_params, rng):
-        """Fit source critic with Gaussian NLL on Bellman target samples."""
+        """Fit source critic by maximizing log-prob of current-state return samples."""
         num_samples = self.config['source_critic_num_samples']
-        _, actor_rng, noise_rng = jax.random.split(rng, 3)
-
-        next_actions = jax.lax.stop_gradient(self.sample_actions(batch['next_observations'], actor_rng))
-        n_next_observations = jnp.repeat(
-            jnp.expand_dims(batch['next_observations'], -2),
+        n_observations = jnp.repeat(
+            jnp.expand_dims(batch['observations'], -2),
             num_samples,
             axis=-2,
         )
-        n_next_actions = jnp.repeat(
-            jnp.expand_dims(next_actions, -2),
+        n_actions = jnp.repeat(
+            jnp.expand_dims(batch['actions'], -2),
             num_samples,
             axis=-2,
         )
 
         sampled_noises = jax.lax.stop_gradient(
-            self.sample_source_noises(n_next_observations, n_next_actions, noise_rng, params=grad_params)
+            self.sample_source_noises(n_observations, n_actions, rng, params=grad_params)
         )
-        sampled_zbar1 = self.compute_flow_returns(
+        sampled_returns1 = self.compute_flow_returns(
             sampled_noises,
-            n_next_observations,
-            n_next_actions,
-            flow_network_name='target_critic_flow1',
+            n_observations,
+            n_actions,
+            flow_network_name='critic_flow1',
+            params=grad_params,
         )
-        sampled_zbar2 = self.compute_flow_returns(
+        sampled_returns2 = self.compute_flow_returns(
             sampled_noises,
-            n_next_observations,
-            n_next_actions,
-            flow_network_name='target_critic_flow2',
+            n_observations,
+            n_actions,
+            flow_network_name='critic_flow2',
+            params=grad_params,
         )
         if self.config['ret_agg'] == 'min':
-            sampled_zbar = jnp.minimum(sampled_zbar1, sampled_zbar2)
+            sampled_returns = jnp.minimum(sampled_returns1, sampled_returns2)
         else:
-            sampled_zbar = (sampled_zbar1 + sampled_zbar2) / 2
-
-        rewards = jnp.reshape(batch['rewards'], (batch['rewards'].shape[0], 1))
-        masks = jnp.reshape(batch['masks'], (batch['masks'].shape[0], 1))
-        bellman_targets = jax.lax.stop_gradient(
-            rewards[:, None, :]
-            + self.config['discount'] * masks[:, None, :] * sampled_zbar
-        )
+            sampled_returns = (sampled_returns1 + sampled_returns2) / 2
+        sampled_returns = jax.lax.stop_gradient(sampled_returns)
 
         source_mean, source_std, source_var = self.source_critic_stats(
             batch['observations'], batch['actions'], params=grad_params
         )
         source_mean = source_mean[:, None, :]
         source_var = source_var[:, None, :]
-
-        source_critic_loss = (
-            ((bellman_targets - source_mean) ** 2) / (2.0 * source_var)
-            + 0.5 * jnp.log(source_var)
-        ).mean()
+        log_prob = -0.5 * (
+            ((sampled_returns - source_mean) ** 2) / source_var
+            + jnp.log(2.0 * jnp.pi * source_var)
+        )
+        source_critic_loss = -log_prob.mean()
 
         return source_critic_loss, {
             'source_critic_loss': source_critic_loss,
-            'source_target_mean': bellman_targets.mean(),
-            'source_target_std': bellman_targets.std(),
+            'source_target_mean': sampled_returns.mean(),
+            'source_target_std': sampled_returns.std(),
             'source_pred_mean': source_mean.mean(),
             'source_pred_std': source_std.mean(),
+            'source_log_prob': log_prob.mean(),
         }
 
     def critic_loss(self, batch, grad_params, rng):
@@ -625,7 +619,7 @@ def get_config():
             source_critic_lambda=1.0,
             source_critic_num_samples=16,
             source_critic_log_std_min=-5.0,
-            source_critic_log_std_max=2.0,
+            source_critic_log_std_max=5.0,
             alpha=10.0,
             encoder=ml_collections.config_dict.placeholder(str),
         )
