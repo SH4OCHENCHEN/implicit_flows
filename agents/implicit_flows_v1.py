@@ -120,15 +120,15 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         next_vector_field2 = self.network.select('target_critic_flow2')(
             noisy_next_returns, times, batch['next_observations'], next_actions
         )
-
         mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
+
         dcfm_target_vector_field = (
             r_vector_field
             + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field
         )
 
         noisy_returns = (
-            rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_returns
+            rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * noisy_next_returns
         )
         dcfm_vector_field1 = self.network.select('critic_flow1')(
             noisy_returns, times, batch['observations'], batch['actions'], params=grad_params
@@ -140,6 +140,7 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             (dcfm_vector_field1 - dcfm_target_vector_field) ** 2
             + (dcfm_vector_field2 - dcfm_target_vector_field) ** 2
         ).mean(axis=-1)
+
         critic_loss = (
             self.config['bcfm_lambda'] * (weights * bcfm_loss)
             + self.config['dcfm_lambda'] * dcfm_loss
