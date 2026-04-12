@@ -309,7 +309,7 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         flow_network_name='critic_flow',
         return_jac_eps_prod=False,
     ):
-        """Compute returns from the return flow model with Euler integration."""
+        """Compute returns from the return flow model using the Euler method."""
         noisy_returns = noises
         noisy_jac_eps_prod = jnp.ones_like(noises)
         if init_times is None:
@@ -318,43 +318,22 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             end_times = jnp.ones((*noisy_returns.shape[:-1], 1), dtype=noisy_returns.dtype)
         step_size = (end_times - init_times) / self.config['num_flow_steps']
 
-        if return_jac_eps_prod:
-            def func(carry, i):
-                noisy_returns, noisy_jac_eps_prod = carry
-
-                times = i * step_size + init_times
-                vector_field, jac_eps_prod = jax.jvp(
-                    lambda ret: self.network.select(flow_network_name)(ret, times, observations, actions),
-                    (noisy_returns,),
-                    (noisy_jac_eps_prod,),
-                )
-                new_noisy_returns = noisy_returns + step_size * vector_field
-                new_noisy_jac_eps_prod = noisy_jac_eps_prod + step_size * jac_eps_prod
-                if self.config['clip_flow_returns']:
-                    new_noisy_returns = jnp.clip(
-                        new_noisy_returns,
-                        self.config['min_reward'] / (1 - self.config['discount']),
-                        self.config['max_reward'] / (1 - self.config['discount']),
-                    )
-
-                return (new_noisy_returns, new_noisy_jac_eps_prod), None
-
-            (noisy_returns, noisy_jac_eps_prod), _ = jax.lax.scan(
-                func,
-                (noisy_returns, noisy_jac_eps_prod),
-                jnp.arange(self.config['num_flow_steps']),
-            )
-            return noisy_returns, noisy_jac_eps_prod
-
         def func(carry, i):
-            (noisy_returns,) = carry
+            """
+            carry: (noisy_returns, )
+            i: current step index
+            """
+            (noisy_returns, noisy_jac_eps_prod) = carry
 
             times = i * step_size + init_times
-            vector_field = self.network.select(flow_network_name)(
-                noisy_returns, times, observations, actions
+            vector_field, jac_eps_prod = jax.jvp(
+                lambda ret: self.network.select(flow_network_name)(ret, times, observations, actions),
+                (noisy_returns, ),
+                (noisy_jac_eps_prod, ),
             )
 
             new_noisy_returns = noisy_returns + step_size * vector_field
+            new_noisy_jac_eps_prod = noisy_jac_eps_prod + step_size * jac_eps_prod
             if self.config['clip_flow_returns']:
                 new_noisy_returns = jnp.clip(
                     new_noisy_returns,
@@ -362,25 +341,26 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
                     self.config['max_reward'] / (1 - self.config['discount']),
                 )
 
-            return (new_noisy_returns,), None
+            return (new_noisy_returns, new_noisy_jac_eps_prod), None
 
-        (noisy_returns,), _ = jax.lax.scan(
-            func,
-            (noisy_returns,),
-            jnp.arange(self.config['num_flow_steps']),
-        )
-        return noisy_returns
+        # Use lax.scan to do the iteration
+        (noisy_returns, noisy_jac_eps_prod), _ = jax.lax.scan(
+            func, (noisy_returns, noisy_jac_eps_prod), jnp.arange(self.config['num_flow_steps']))
+
+        if return_jac_eps_prod:
+            return noisy_returns, noisy_jac_eps_prod
+        else:
+            return noisy_returns
 
     @jax.jit
     def compute_flow_actions(
         self,
         noises,
         observations,
-        params=None,
         init_times=None,
         end_times=None,
     ):
-        """Compute actions from BC flow with Euler integration."""
+        """Compute actions from the BC flow model using the Euler method."""
         noisy_actions = noises
         if init_times is None:
             init_times = jnp.zeros((*noisy_actions.shape[:-1], 1), dtype=noisy_actions.dtype)
@@ -389,26 +369,28 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         step_size = (end_times - init_times) / self.config['num_flow_steps']
 
         def func(carry, i):
+            """
+            carry: (noisy_actions, )
+            i: current step index
+            """
             (noisy_actions,) = carry
 
             times = i * step_size + init_times
             vector_field = self.network.select('actor_flow')(
-                observations, noisy_actions, times, params=params
-            )
+                observations, noisy_actions, times)
             new_noisy_actions = noisy_actions + vector_field * step_size
             if self.config['clip_flow_actions']:
                 new_noisy_actions = jnp.clip(new_noisy_actions, -1, 1)
 
             return (new_noisy_actions,), None
 
+        # Use lax.scan to do the iteration
         (noisy_actions,), _ = jax.lax.scan(
-            func,
-            (noisy_actions,),
-            jnp.arange(self.config['num_flow_steps']),
-        )
+            func, (noisy_actions,), jnp.arange(self.config['num_flow_steps']))
 
         if not self.config['clip_flow_actions']:
             noisy_actions = jnp.clip(noisy_actions, -1, 1)
+
         return noisy_actions
 
     @partial(jax.jit, static_argnames=('policy_extraction'))
@@ -587,7 +569,7 @@ def get_config():
             clip_flow_returns=True,
             num_samples=8,
             num_flow_steps=8,
-            normalize_q_loss=True,
+            normalize_q_loss=False,
             confidence_weight_temp=0.3,  # Temperature for confidence weight (for BCFM only).
             bcfm_lambda=1.0,  # Bootstrapped conditional flow-matching weight.
             dcfm_lambda=1.0,  # Dynamic conditional flow-matching (implicit) weight.
