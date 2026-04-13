@@ -75,9 +75,8 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             jnp.expand_dims(batch['rewards'], axis=-1)
             + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_returns
         )
-        noises = jax.random.normal(noise_rng, (batch_size, 1))
-        bcfm_noisy_returns = times * returns + (1 - times) * noises
-        bcfm_target_vector_field = returns - noises
+        bcfm_noisy_returns = times * returns + (1 - times) * bcfm_noises
+        bcfm_target_vector_field = returns - bcfm_noises
         bcfm_vector_field1 = self.network.select('critic_flow1')(
             bcfm_noisy_returns, times, batch['observations'], batch['actions'], params=grad_params
         )
