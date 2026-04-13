@@ -62,7 +62,7 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         cur_noises = jax.random.normal(noise_rng, (batch_size, 1))
         returns = (jnp.expand_dims(batch['rewards'], axis=-1) +
                    self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_returns)
-        ret_noises = jax.sqrt((1-self.config['discount'] ** 2)) * cur_noises + self.config['discount'] * noises
+        ret_noises = jnp.sqrt((1-self.config['discount'] ** 2)) * cur_noises + self.config['discount'] * noises
         noisy_returns = times * returns + (1 - times) * ret_noises
         target_vector_field = returns - ret_noises
 
