@@ -35,3 +35,9 @@ cdpv3_coef_sweep_results/
 implicit_flows_v2_coef_sweep_result/
 
 tdflow_result/
+
+# Experiment outputs (generic)
+*_result/
+*_results/
+wandb/
+runs/
