@@ -510,7 +510,7 @@ def get_config():
             clip_flow_actions=True,  # Whether to clip the intermediate flow actions.
             clip_flow_returns=True,  # Whether to clip flow returns.
             confidence_weight_temp=0.3,  # Temperature for the confidence weights.
-            dcfm_lambda=1.0,  # Distributional conditional flow matching loss coefficient.
+            bcfm_lambda=1.0,  # Distributional conditional flow matching loss coefficient.
             consis_lambda=1.0,  # Bootstrapped conditional flow matching loss coefficient.
             alpha=10.0,  # Flow distillation coefficient.
             normalize_q_loss=False,  # Whether to normalize the Q loss.
