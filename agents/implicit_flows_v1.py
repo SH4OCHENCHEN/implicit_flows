@@ -45,26 +45,33 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         weights = jax.lax.stop_gradient(weights)
 
         # BCFM  regularization loss
-        noises = jax.random.normal(noise_rng, (batch_size, 1))
+        next_noises = jax.random.normal(noise_rng, (batch_size, 1))
         times = jax.random.uniform(time_rng, (batch_size, 1))
-        next_returns1 = self.compute_flow_returns(
-            noises, batch['next_observations'], next_actions,
+        noisy_next_returns1 = self.compute_flow_returns(
+            next_noises, batch['next_observations'], next_actions, end_times=times,
             flow_network_name='target_critic_flow1')
-        next_returns2 = self.compute_flow_returns(
-            noises, batch['next_observations'], next_actions,
+        noisy_next_returns2 = self.compute_flow_returns(
+            next_noises, batch['next_observations'], next_actions, end_times=times,
             flow_network_name='target_critic_flow2')
         if self.config['ret_agg'] == 'min':
-            next_returns = jnp.minimum(next_returns1, next_returns2)
+            noisy_next_returns = jnp.minimum(noisy_next_returns1, noisy_next_returns2)
         else:
-            next_returns = (next_returns1 + next_returns2) / 2
+            noisy_next_returns = (noisy_next_returns1 + noisy_next_returns2) / 2
 
         # The following returns will be bounded automatically
-        cur_noises = jax.random.normal(noise_rng, (batch_size, 1))
+        next_vector_field1 = self.network.select('target_critic_flow1')(
+            noisy_next_returns, times, batch['next_observations'], next_actions)
+        next_vector_field2 = self.network.select('target_critic_flow2')(
+            noisy_next_returns, times, batch['next_observations'], next_actions)
+        next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2) if self.config['ret_agg'] == 'min' else (next_vector_field1 + next_vector_field2) / 2
+        next_returns = noisy_next_returns + (1 - times) * next_vector_field
         returns = (jnp.expand_dims(batch['rewards'], axis=-1) +
                    self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_returns)
-        ret_noises = jnp.sqrt((1-self.config['discount'] ** 2)) * cur_noises + self.config['discount'] * noises
-        noisy_returns = times * returns + (1 - times) * ret_noises
-        target_vector_field = returns - ret_noises
+        
+        noises = jax.random.normal(noise_rng, (batch_size, 1))
+        times_new = jax.random.uniform(time_rng, (batch_size, 1))
+        noisy_returns = times_new * returns + (1 - times_new) * noises
+        target_vector_field = returns - noises
 
         vector_field1 = self.network.select('critic_flow1')(
             noisy_returns, times, batch['observations'], batch['actions'], params=grad_params)
@@ -72,39 +79,14 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
             noisy_returns, times, batch['observations'], batch['actions'], params=grad_params)
         bcfm_loss = ((vector_field1 - target_vector_field) ** 2 +
                      (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
-
-        # DCFM loss
-        noisy_next_returns1 = self.compute_flow_returns(
-            noises, batch['next_observations'], next_actions, end_times=times,
-            flow_network_name='target_critic_flow1')
-        noisy_next_returns2 = self.compute_flow_returns(
-            noises, batch['next_observations'], next_actions, end_times=times,
-            flow_network_name='target_critic_flow2')
-        if self.config['ret_agg'] == 'min':
-            noisy_next_returns = jnp.minimum(noisy_next_returns1, noisy_next_returns2)
-        else:
-            noisy_next_returns = (noisy_next_returns1 + noisy_next_returns2) / 2
-        noisy_returns = (
-            jnp.expand_dims(batch['rewards'], axis=-1) +
-            self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * noisy_next_returns
-        )
-        vector_field1 = self.network.select('critic_flow1')(
-            noisy_returns, times, batch['observations'], batch['actions'], params=grad_params)
-        vector_field2 = self.network.select('critic_flow2')(
-            noisy_returns, times, batch['observations'], batch['actions'], params=grad_params)
-        target_vector_field1 = self.network.select('target_critic_flow1')(
-            noisy_next_returns, times, batch['next_observations'], next_actions)
-        target_vector_field2 = self.network.select('target_critic_flow2')(
-            noisy_next_returns, times, batch['next_observations'], next_actions)
-
-        if self.config['ret_agg'] == 'min':
-            target_vector_field = jnp.minimum(target_vector_field1, target_vector_field2)
-        else:
-            target_vector_field = (target_vector_field1 + target_vector_field2) / 2
-        dcfm_loss = ((vector_field1 - target_vector_field) ** 2 +
-                     (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
-
-        critic_loss = (self.config['bcfm_lambda'] * bcfm_loss + self.config['dcfm_lambda'] * dcfm_loss)
+        
+        consis_rets1 = noisy_returns + (1 - times) * vector_field1
+        consis_rets2 = noisy_returns + (1 - times) * vector_field2
+        consis_loss = ((consis_rets1 - returns) ** 2 +
+                        (consis_rets2 - returns) ** 2).mean(axis=-1)
+        
+        critic_loss = self.config['bcfm_lambda'] * bcfm_loss + \
+              self.config['consis_lambda'] * consis_loss
         critic_loss = (weights * critic_loss).mean()
 
         # For logging and confidence weights.
@@ -133,7 +115,6 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         return critic_loss, {
             'critic_loss': critic_loss,
             'bcfm_loss': bcfm_loss.mean(),
-            'dcfm_loss': dcfm_loss.mean(),
             'q_mean': q.mean(),
             'q_std': q_stds.mean(),
             'q_std_max': q_stds.max(),
@@ -529,8 +510,8 @@ def get_config():
             clip_flow_actions=True,  # Whether to clip the intermediate flow actions.
             clip_flow_returns=True,  # Whether to clip flow returns.
             confidence_weight_temp=0.3,  # Temperature for the confidence weights.
-            dcfm_lambda=0.0,  # Distributional conditional flow matching loss coefficient.
-            bcfm_lambda=1.0,  # Bootstrapped conditional flow matching loss coefficient.
+            bcfm_lambda=1.0,  # Distributional conditional flow matching loss coefficient.
+            consis_lambda=1.0,  # Bootstrapped conditional flow matching loss coefficient.
             alpha=10.0,  # Flow distillation coefficient.
             normalize_q_loss=False,  # Whether to normalize the Q loss.
             num_samples=16,  # Number of action samples for rejection sampling.
