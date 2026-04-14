@@ -43,23 +43,17 @@ run_exp() {
 for seed in "${SEED_LIST[@]}"; do
   if [[ "$RUN_OGBENCH" == "1" ]]; then
     for task_id in "${TASK_IDS[@]}"; do
-      run_exp "implicit_flows_v3-scene-${task_id}-seed${seed}" \
-        --seed="${seed}" \
-        --env_name="scene-play-singletask-${task_id}-v0" \
-        --agent=agents/implicit_flows_v3.py \
-        --agent.ret_agg=min || true
-
-      run_exp "implicit_flows_v3-cube-double-${task_id}-seed${seed}" \
-        --seed="${seed}" \
-        --env_name="cube-double-play-singletask-${task_id}-v0" \
-        --agent=agents/implicit_flows_v3.py \
-        --agent.discount=0.995 || true
-
       run_exp "implicit_flows_v3-cube-triple-${task_id}-seed${seed}" \
         --seed="${seed}" \
         --env_name="cube-triple-play-singletask-${task_id}-v0" \
         --agent=agents/implicit_flows_v3.py \
         --agent.discount=0.995 || true
+
+      run_exp "implicit_flows_v3-puzzle4-${PUZZLE_TASK_ID}-seed${seed}" \
+        --seed="${seed}" \
+        --env_name="puzzle-4x4-play-singletask-${PUZZLE_TASK_ID}-v0" \
+        --agent=agents/implicit_flows_v3.py \
+        --agent.q_agg=min || true
     done
   fi
 
