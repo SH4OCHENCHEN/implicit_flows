@@ -28,6 +28,7 @@ agents = dict(
     cdp_v3=CDPV3Agent,
     cdp_v4=CDPV4Agent,
     cdp_v5=CDPV5Agent,
+    cdpv5=CDPV5Agent,
     codac=CODACAgent,
     fbrac=FBRACAgent,
     fql=FQLAgent,
