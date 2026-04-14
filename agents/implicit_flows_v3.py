@@ -151,7 +151,7 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
 
         return critic_loss, {
             'critic_loss': critic_loss,
-            'implicit_loss': implicit_loss,
+            'implicit_loss': implicit_loss.mean(),
             'q_mean': q.mean(),
             'q_max': q.max(),
             'q_min': q.min(),
