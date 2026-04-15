@@ -334,6 +334,7 @@ class CDPV5Agent(flax.struct.PyTreeNode):
             self._mppi_refine_behavior_actions(
                 batch['observations'],
                 behavior_pool_actions,
+                None,
                 mppi_rng,
             )
         )
