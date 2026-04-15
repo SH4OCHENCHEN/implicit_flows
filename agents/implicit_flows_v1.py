@@ -70,20 +70,27 @@ class ImplicitFlowsV1Agent(flax.struct.PyTreeNode):
         
         noises = jax.random.normal(noise_rng, (batch_size, 1))
         times_new = jax.random.uniform(time_rng, (batch_size, 1))
-        noisy_returns = times_new * returns + (1 - times_new) * noises
-        target_vector_field = returns - noises
+
+        noisy_returns_time = times * returns + (1 - times) * noises
+        noisy_returns_new = times_new * returns + (1 - times_new) * noises
 
         vector_field1 = self.network.select('critic_flow1')(
-            noisy_returns, times, batch['observations'], batch['actions'], params=grad_params)
+            noisy_returns_time, times, batch['observations'], batch['actions'], params=grad_params)
         vector_field2 = self.network.select('critic_flow2')(
-            noisy_returns, times, batch['observations'], batch['actions'], params=grad_params)
+            noisy_returns_time, times, batch['observations'], batch['actions'], params=grad_params)
+        vector_field1_new = self.network.select('target_critic_flow1')(
+            noisy_returns_new, times_new, batch['observations'], batch['actions'])
+        vector_field2_new = self.network.select('target_critic_flow2')(
+            noisy_returns_new, times_new, batch['observations'], batch['actions'])
+        target_vector_field = jnp.minimum(vector_field1_new, vector_field2_new) if self.config['ret_agg'] == 'min' else (vector_field1_new + vector_field2_new) / 2
         bcfm_loss = ((vector_field1 - target_vector_field) ** 2 +
                      (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
         
-        consis_rets1 = noisy_returns + (1 - times) * vector_field1
-        consis_rets2 = noisy_returns + (1 - times) * vector_field2
-        consis_loss = ((consis_rets1 - returns) ** 2 +
-                        (consis_rets2 - returns) ** 2).mean(axis=-1)
+        consis_rets1 = noisy_returns_time + (1 - times) * vector_field1
+        consis_rets2 = noisy_returns_time + (1 - times) * vector_field2
+        returns_new = noisy_returns_new + (1 - times_new) * target_vector_field
+        consis_loss = ((consis_rets1 - returns_new) ** 2 +
+                        (consis_rets2 - returns_new) ** 2).mean(axis=-1)
         
         critic_loss = self.config['bcfm_lambda'] * bcfm_loss + \
               self.config['consis_lambda'] * consis_loss

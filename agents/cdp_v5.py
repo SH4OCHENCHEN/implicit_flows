@@ -157,6 +157,7 @@ class CDPV5Agent(flax.struct.PyTreeNode):
 
     Diff vs `cdp_v4`:
     - Policy positives are mixed: behavior top-Q + dataset perturb actions.
+    - Policy positive logits are Q-biased on the mixed positive pool.
     - Policy negatives are mixed: policy self + behavior low-Q actions.
     - Middle-Q behavior candidates are dropped from policy drift.
     """
@@ -297,12 +298,52 @@ class CDPV5Agent(flax.struct.PyTreeNode):
         pos_actions = jnp.concatenate([pos_behavior_actions, dataset_pos_actions], axis=1)
         neg_actions = jnp.concatenate([raw_policy_actions, neg_behavior_actions], axis=1)
 
+        # Build per-positive weights from state-wise scaled exp(Q) on the mixed positive pool.
+        if pos_actions.shape[1] > 0:
+            policy_pos_obs_repeat = jnp.repeat(batch['observations'][:, None, ...], pos_actions.shape[1], axis=1)
+            policy_pos_obs_flat = policy_pos_obs_repeat.reshape(
+                (batch_size * pos_actions.shape[1], *batch['observations'].shape[1:])
+            )
+            pos_actions_flat = pos_actions.reshape((batch_size * pos_actions.shape[1], action_dim))
+
+            pos_qs = self.network.select('critic')(policy_pos_obs_flat, actions=pos_actions_flat)
+            if self.config['q_agg'] == 'min':
+                pos_q = pos_qs.min(axis=0)
+            else:
+                pos_q = pos_qs.mean(axis=0)
+            pos_q = pos_q.reshape((batch_size, pos_actions.shape[1]))
+            pos_q = jax.lax.stop_gradient(pos_q)
+
+            lam = jax.lax.stop_gradient(1.0 / (jnp.abs(pos_q).mean(axis=1, keepdims=True) + 1e-8))
+            pos_q_scaled = pos_q * lam
+            pos_probs = jax.nn.softmax(pos_q_scaled / self.config['pos_prob_temp'], axis=1)
+            pos_probs = jax.lax.stop_gradient(pos_probs)
+            pos_logit_bias = jnp.expand_dims(jnp.log(pos_probs + 1e-12), axis=1)
+
+            pos_q_mean = pos_q.mean()
+            pos_q_scaled_mean = pos_q_scaled.mean()
+            pos_q_weighted_mean = (pos_probs * pos_q).sum(axis=1).mean()
+            lam_mean = lam.mean()
+            lam_min = lam.min()
+            lam_max = lam.max()
+            pos_entropy = (-pos_probs * jnp.log(pos_probs + 1e-12)).sum(axis=1).mean()
+        else:
+            pos_logit_bias = None
+            pos_q_mean = jnp.asarray(0.0, dtype=behavior_pool_q.dtype)
+            pos_q_scaled_mean = jnp.asarray(0.0, dtype=behavior_pool_q.dtype)
+            pos_q_weighted_mean = jnp.asarray(0.0, dtype=behavior_pool_q.dtype)
+            lam_mean = jnp.asarray(0.0, dtype=behavior_pool_q.dtype)
+            lam_min = jnp.asarray(0.0, dtype=behavior_pool_q.dtype)
+            lam_max = jnp.asarray(0.0, dtype=behavior_pool_q.dtype)
+            pos_entropy = jnp.asarray(0.0, dtype=behavior_pool_q.dtype)
+
         policy_drift_loss = multi_temp_drifting_loss(
             raw_policy_actions,
             pos_actions,
             neg_actions,
             temps=drift_temps,
             exclude_self_neg=True,
+            pos_logit_bias=pos_logit_bias,
         )
 
         # Total actor loss: train both actors together.
@@ -333,10 +374,17 @@ class CDPV5Agent(flax.struct.PyTreeNode):
             'policy_drift_loss': policy_drift_loss,
             'drift_batch_loss': behavior_drift_loss,  # backward-compatible key
             'drift_prob_loss': policy_drift_loss,  # backward-compatible key
-            'pos_q': pos_behavior_q_mean,  # backward-compatible key
+            'pos_q': pos_q_mean,  # backward-compatible key
             'behavior_pool_q_mean': behavior_pool_q.mean(),
             'behavior_pool_q_max': behavior_pool_q.max(),
             'behavior_pool_q_min': behavior_pool_q.min(),
+            'pos_actions_q_mean': pos_q_mean,
+            'pos_q_scaled': pos_q_scaled_mean,
+            'pos_q_weighted': pos_q_weighted_mean,
+            'lam_mean': lam_mean,
+            'lam_min': lam_min,
+            'lam_max': lam_max,
+            'pos_entropy': pos_entropy,
             'pos_behavior_q_mean': pos_behavior_q_mean,
             'neg_behavior_q_mean': neg_behavior_q_mean,
             'behavior_q_gap': behavior_q_gap,
@@ -538,7 +586,7 @@ def get_config():
             policy_num_neg=16,  # Number of policy self-generated negatives for policy drifting.
             num_neg=16,  # Deprecated/unused in cdp_v5 actor loss (kept for CLI compatibility).
             num_samples=16,  # Deprecated/unused in cdp_v5 policy drift (kept for CLI compatibility).
-            pos_prob_temp=10,  # Deprecated/unused in cdp_v5 policy drift (kept for CLI compatibility).
+            pos_prob_temp=10,  # Temperature for exp(Q) sampling probabilities on mixed policy positives.
             policy_neg_behavior_ratio=1.0,  # Deprecated/unused in cdp_v5 policy drift (kept for CLI compatibility).
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
