@@ -12,7 +12,7 @@ from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, ValueVectorField
 
 
-class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
+class ImplicitFlowsV5Agent(flax.struct.PyTreeNode):
     """Implicit Flows v4 agent (v1 critic + Value Flows actor/policy extraction)."""
 
     rng: Any
@@ -506,7 +506,7 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='implicit_flows_v4',
+            agent_name='implicit_flows_v5',
             ob_dims=ml_collections.config_dict.placeholder(list),
             action_dim=ml_collections.config_dict.placeholder(int),
             min_reward=ml_collections.config_dict.placeholder(float),
