@@ -43,3 +43,6 @@ tdflow_result/
 *_results/
 wandb/
 runs/
+
+implicit_flows_v4_result/
+implicit_flows_v4_results/
