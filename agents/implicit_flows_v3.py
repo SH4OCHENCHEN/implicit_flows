@@ -126,7 +126,7 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         )
         target_vector_field = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field + r_vector_field
         implicit_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
-        critic_loss = (weights * implicit_loss).mean()
+        critic_loss = (implicit_loss).mean()
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
         q1 = (q_noises + self.network.select('critic_flow1')(
@@ -191,10 +191,22 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
-        q1 = (q_noises + self.network.select('critic_flow1')(
-            q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
-        q2 = (q_noises + self.network.select('critic_flow2')(
-            q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
+        q1 = self.compute_flow_returns(
+            q_noises,
+            batch['observations'],
+            actor_actions,
+            flow_network_name='critic_flow1',
+        ).squeeze(-1)
+        q2 = self.compute_flow_returns(
+            q_noises,
+            batch['observations'],
+            actor_actions,
+            flow_network_name='critic_flow2',
+        ).squeeze(-1)
+        # q1 = (q_noises + self.network.select('critic_flow1')(
+        #     q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
+        # q2 = (q_noises + self.network.select('critic_flow2')(
+        #     q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
         if self.config['clip_flow_returns']:
             q1 = jnp.clip(
                 q1,

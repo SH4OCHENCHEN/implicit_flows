@@ -130,8 +130,8 @@ class ValueFlowsAgent(flax.struct.PyTreeNode):
 
         return critic_loss, {
             'critic_loss': critic_loss,
-            'bcfm_loss': bcfm_loss,
-            'dcfm_loss': dcfm_loss,
+            'bcfm_loss': bcfm_loss.mean(),
+            'dcfm_loss': dcfm_loss.mean(),
             'q_mean': q.mean(),
             'q_std': q_stds.mean(),
             'q_std_max': q_stds.max(),
