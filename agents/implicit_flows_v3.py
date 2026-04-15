@@ -48,34 +48,6 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         next_ret_stds1 = jnp.sqrt(ret_jac_eps_prods1.squeeze(-1) ** 2)
         next_ret_stds2 = jnp.sqrt(ret_jac_eps_prods2.squeeze(-1) ** 2)
 
-        # Time-dependent clipping anchor:
-        # t=0 -> Gaussian 3-sigma interval, t=1 -> return range.
-        # Here we use t+delta because we clip one-step-ahead learning targets.
-        gaussian_low = (
-            self.config['next_return_gaussian_mean']
-            - self.config['next_return_clip_sigma'] * self.config['next_return_gaussian_std']
-        )
-        gaussian_high = (
-            self.config['next_return_gaussian_mean']
-            + self.config['next_return_clip_sigma'] * self.config['next_return_gaussian_std']
-        )
-        return_low = self.config['min_reward'] / (1 - self.config['discount'])
-        return_high = self.config['max_reward'] / (1 - self.config['discount'])
-        delta = 1.0 / self.config['num_flow_steps']
-        next_times = jnp.minimum(times + delta, 1.0)
-
-        clip_low = (
-            (1 - next_times) * gaussian_low
-            + next_times * return_low
-            - self.config['next_return_clip_slack']
-        )
-        clip_high = (
-            (1 - next_times) * gaussian_high
-            + next_times * return_high
-            + self.config['next_return_clip_slack']
-        )
-        clip_high = jnp.maximum(clip_high, clip_low + 1e-6)
-
         ret_stds1 = next_ret_stds1
         ret_stds2 = next_ret_stds2
 
@@ -86,7 +58,7 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
             mixed_next_returns = (noisy_next_returns1 + noisy_next_returns2) / 2
 
         eta = jax.random.normal(ret_rng, (batch_size, 1))
-        r_noises = jnp.sqrt((1 - self.config['discount'] ** 2)) * eta
+        r_noises = jnp.sqrt((1 - (self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1)) ** 2) * eta)
         rt = times * jnp.expand_dims(batch['rewards'], axis=-1) + (1 - times) * r_noises
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
 
@@ -104,14 +76,6 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         next_vector_field2 = self.network.select('target_critic_flow2')(
             mixed_next_returns, times, batch['next_observations'], next_actions
         )
-        # Clip next vector fields so one-step prediction stays inside [clip_low, clip_high]:
-        # mixed_next_returns + delta * next_vector_field in bounds.
-        next_vector_clip_low = (clip_low - mixed_next_returns) / delta
-        next_vector_clip_high = (clip_high - mixed_next_returns) / delta
-        next_vector_clip_high = jnp.maximum(next_vector_clip_high, next_vector_clip_low + 1e-6)
-        next_vector_field1 = jnp.clip(next_vector_field1, next_vector_clip_low, next_vector_clip_high)
-        next_vector_field2 = jnp.clip(next_vector_field2, next_vector_clip_low, next_vector_clip_high)
-
         mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
 
         noisy_returns = (
@@ -160,8 +124,6 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
             'weights_max': weights.max(),
             'next_ret_std_mean': ret_stds.mean(),
             'next_ret_std_max': ret_stds.max(),
-            'next_return_clip_low_mean': clip_low.mean(),
-            'next_return_clip_high_mean': clip_high.mean(),
             'next_return1_mean': noisy_next_returns1.mean(),
             'next_return2_mean': noisy_next_returns2.mean(),
             'mixed_next_return_mean': mixed_next_returns.mean(),
@@ -191,22 +153,22 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
-        q1 = self.compute_flow_returns(
-            q_noises,
-            batch['observations'],
-            actor_actions,
-            flow_network_name='critic_flow1',
-        ).squeeze(-1)
-        q2 = self.compute_flow_returns(
-            q_noises,
-            batch['observations'],
-            actor_actions,
-            flow_network_name='critic_flow2',
-        ).squeeze(-1)
-        # q1 = (q_noises + self.network.select('critic_flow1')(
-        #     q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
-        # q2 = (q_noises + self.network.select('critic_flow2')(
-        #     q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
+        # q1 = self.compute_flow_returns(
+        #     q_noises,
+        #     batch['observations'],
+        #     actor_actions,
+        #     flow_network_name='critic_flow1',
+        # ).squeeze(-1)
+        # q2 = self.compute_flow_returns(
+        #     q_noises,
+        #     batch['observations'],
+        #     actor_actions,
+        #     flow_network_name='critic_flow2',
+        # ).squeeze(-1)
+        q1 = (q_noises + self.network.select('critic_flow1')(
+            q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
+        q2 = (q_noises + self.network.select('critic_flow2')(
+            q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
         if self.config['clip_flow_returns']:
             q1 = jnp.clip(
                 q1,
