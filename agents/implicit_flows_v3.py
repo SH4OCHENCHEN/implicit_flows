@@ -58,7 +58,7 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
             mixed_next_returns = (noisy_next_returns1 + noisy_next_returns2) / 2
 
         eta = jax.random.normal(ret_rng, (batch_size, 1))
-        r_noises = jnp.sqrt((1 - (self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1)) ** 2) * eta)
+        r_noises = jnp.sqrt((1 - (self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1)) ** 2)) * eta
         rt = times * jnp.expand_dims(batch['rewards'], axis=-1) + (1 - times) * r_noises
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
 
@@ -76,7 +76,10 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         next_vector_field2 = self.network.select('target_critic_flow2')(
             mixed_next_returns, times, batch['next_observations'], next_actions
         )
-        mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
+        if self.config['ret_agg'] == 'min':
+            mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
+        else:
+            mixed_next_vector_field = (next_vector_field1 + next_vector_field2) / 2
 
         noisy_returns = (
             rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_returns

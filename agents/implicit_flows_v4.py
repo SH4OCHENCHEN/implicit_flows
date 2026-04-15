@@ -96,7 +96,7 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
             mixed_next_returns = (noisy_next_returns1 + noisy_next_returns2) / 2
 
         eta = jax.random.normal(ret_rng, (batch_size, 1))
-        r_noises = jnp.sqrt((1 - self.config['discount'] ** 2)) * eta
+        r_noises = jnp.sqrt((1 - (self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1)) ** 2)) * eta
         rt = times * jnp.expand_dims(batch['rewards'], axis=-1) + (1 - times) * r_noises
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
 
@@ -122,7 +122,10 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
         next_vector_field1 = jnp.clip(next_vector_field1, next_vector_clip_low, next_vector_clip_high)
         next_vector_field2 = jnp.clip(next_vector_field2, next_vector_clip_low, next_vector_clip_high)
 
-        mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
+        if self.config['ret_agg'] == 'min':
+            mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
+        else:
+            mixed_next_vector_field = (next_vector_field1 + next_vector_field2) / 2
 
         noisy_returns = (
             rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_returns
