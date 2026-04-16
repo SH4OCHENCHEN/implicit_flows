@@ -152,12 +152,12 @@ def select_action_subsets(actions: jnp.ndarray, scores: jnp.ndarray, topk: int, 
     return top_actions, bottom_actions, top_scores, bottom_scores
 
 
-class CDPV5Agent(flax.struct.PyTreeNode):
-    """CDP v5 agent with mixed positive/negative pools for policy drift.
+class CDPV6Agent(flax.struct.PyTreeNode):
+    """CDP v6 agent with mixed positive/negative pools for policy drift.
 
-    Diff vs `cdp_v4`:
-    - Policy positives are mixed: behavior proposal -> MPPI refinement top-Q + dataset perturb actions.
-    - Policy positive logits are Q-biased on the mixed positive pool.
+    Diff vs `cdp_v5`:
+    - Policy positives are MPPI-refined behavior proposals only (no dataset perturb positives).
+    - Policy positive logits are Q-biased on the MPPI positive pool.
     - Policy negatives are mixed: policy self + behavior low-Q actions.
     - Middle-Q behavior candidates are dropped from policy drift.
     """
@@ -194,7 +194,7 @@ class CDPV5Agent(flax.struct.PyTreeNode):
             'q_data_min': q_data.min(),
         }
 
-    def _score_action_candidates(self, observations, candidate_actions, grad_params=None):
+    def _score_action_candidates(self, observations, candidate_actions, grad_params):
         """Score a batch of candidate actions with the aggregated critic Q."""
         batch_size, num_actions, action_dim = candidate_actions.shape
         candidate_obs_repeat = jnp.repeat(observations[:, None, ...], num_actions, axis=1)
@@ -261,12 +261,10 @@ class CDPV5Agent(flax.struct.PyTreeNode):
         policy_num_neg = self.config['policy_num_neg']
         behavior_pool_size = self.config['mppi_num_samples']
         behavior_bottomk_neg = self.config['behavior_bottomk_neg']
-        dataset_num_pos = self.config['dataset_num_pos']
-        dataset_perturb_std = self.config['dataset_perturb_std']
         drift_temps = self.config['drift_temps']
         mppi_num_pos = self.config['mppi_num_pos']
-        rng, behavior_noise_rng, policy_x_noise_rng, behavior_pool_noise_rng, dataset_pos_rng, mse_rng, mppi_rng = (
-            jax.random.split(rng, 7)
+        _, behavior_noise_rng, policy_x_noise_rng, behavior_pool_noise_rng, mse_rng, mppi_rng = (
+            jax.random.split(rng, 6)
         )
 
         # =========================
@@ -295,7 +293,7 @@ class CDPV5Agent(flax.struct.PyTreeNode):
 
         # =========================
         # 2) Policy actor loss:
-        # positives = MPPI-refined behavior top-Q + dataset perturb
+        # positives = MPPI-refined behavior top-Q only
         # negatives = policy self + behavior low-Q
         # =========================
         policy_neg_obs_repeat = jnp.repeat(batch['observations'][:, None, ...], policy_num_neg, axis=1)
@@ -322,20 +320,22 @@ class CDPV5Agent(flax.struct.PyTreeNode):
         )
         behavior_pool_noises_flat = behavior_pool_noises.reshape((batch_size * behavior_pool_size, action_dim))
         behavior_pool_actions_flat = self.network.select('actor_behavior_onestep_flow')(
-            behavior_pool_obs_flat, behavior_pool_noises_flat, params=grad_params
+            behavior_pool_obs_flat, behavior_pool_noises_flat
         )
         behavior_pool_actions_flat = jnp.clip(behavior_pool_actions_flat, -1, 1)
         behavior_pool_actions = behavior_pool_actions_flat.reshape(
             (batch_size, behavior_pool_size, action_dim)
         )
 
-        behavior_pool_q = self._score_action_candidates(batch['observations'], behavior_pool_actions)
+        behavior_pool_q = self._score_action_candidates(
+            batch['observations'], behavior_pool_actions, grad_params=None,
+        )
         refined_behavior_actions, refined_behavior_q, mppi_weight_entropy, mppi_std_mean = (
             self._mppi_refine_behavior_actions(
                 batch['observations'],
                 behavior_pool_actions,
-                None,
-                mppi_rng,
+                grad_params=None,
+                rng=mppi_rng,
             )
         )
 
@@ -352,18 +352,7 @@ class CDPV5Agent(flax.struct.PyTreeNode):
             bottomk=behavior_bottomk_neg,
         )
 
-        # Add dataset-near perturbation positives.
-        if dataset_num_pos > 0:
-            dataset_pos_noise = jax.random.normal(dataset_pos_rng, (batch_size, dataset_num_pos, action_dim))
-            dataset_pos_actions = jnp.clip(
-                batch['actions'][:, None, :] + dataset_perturb_std * dataset_pos_noise,
-                -1.0,
-                1.0,
-            )
-        else:
-            dataset_pos_actions = jnp.zeros((batch_size, 0, action_dim), dtype=batch['actions'].dtype)
-
-        pos_actions = jnp.concatenate([pos_behavior_actions, dataset_pos_actions], axis=1)
+        pos_actions = pos_behavior_actions
         neg_actions = jnp.concatenate([raw_policy_actions, neg_behavior_actions], axis=1)
 
         # Build per-positive weights from state-wise scaled exp(Q) on the mixed positive pool.
@@ -374,7 +363,9 @@ class CDPV5Agent(flax.struct.PyTreeNode):
             )
             pos_actions_flat = pos_actions.reshape((batch_size * pos_actions.shape[1], action_dim))
 
-            pos_qs = self.network.select('critic')(policy_pos_obs_flat, actions=pos_actions_flat)
+            pos_qs = self.network.select('critic')(
+                policy_pos_obs_flat, actions=pos_actions_flat
+            )
             if self.config['q_agg'] == 'min':
                 pos_q = pos_qs.min(axis=0)
             else:
@@ -470,10 +461,10 @@ class CDPV5Agent(flax.struct.PyTreeNode):
                     behavior_pool_size,
                 )
             ),
-            'dataset_num_pos': jnp.asarray(max(int(dataset_num_pos), 0)),
+            'dataset_num_pos': jnp.asarray(0),
             'policy_pos_total': jnp.asarray(pos_actions.shape[1]),
             'policy_neg_total': jnp.asarray(neg_actions.shape[1]),
-            'policy_num_pos': jnp.asarray(self.config['policy_num_pos']),  # backward-compatible key
+            'policy_num_pos': jnp.asarray(mppi_num_pos),  # backward-compatible key
             'policy_num_neg': jnp.asarray(policy_num_neg),
             'mse': mse,
         }
@@ -633,7 +624,7 @@ class CDPV5Agent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='cdp_v5',  # Agent name.
+            agent_name='cdp_v6',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
@@ -648,26 +639,18 @@ def get_config():
             drift_temps=(0.1, 1.0, 10.0),  # Multi-temperature drift loss (summed over all temps).
             drift_batch_weight=1.0,  # Weight of behavior-actor drifting loss (single dataset positive).
             drift_prob_weight=1.0,  # Weight of policy-actor drifting loss (mixed positive/negative pools).
-            behavior_num_neg=4,  # Number of generated negatives for behavior drifting.
-            behavior_pool_size=16,  # Deprecated/unused in cdp_v5 MPPI positives (kept for CLI compatibility).
-            behavior_topk_pos=4,  # Deprecated/unused in cdp_v5 MPPI positives (kept for CLI compatibility).
+            behavior_num_neg=16,  # Number of generated negatives for behavior drifting.
             behavior_bottomk_neg=4,  # Number of low-Q behavior candidates used as policy negatives.
-            dataset_num_pos=4,  # Number of dataset perturbation positives for policy drift.
-            dataset_perturb_std=0.05,  # Std of Gaussian perturbation around dataset actions.
             mppi_enable=True,  # Whether to refine behavior proposals before selecting policy positives.
-            mppi_iters=2,  # Number of MPPI refinement iterations on the behavior proposal pool.
+            mppi_iters=3,  # Number of MPPI refinement iterations on the behavior proposal pool.
             mppi_num_samples=16,  # Number of MPPI refinement samples / behavior proposal candidates.
-            mppi_num_pos=8,  # Number of refined MPPI behavior actions used as policy positives.
+            mppi_num_pos=16,  # Number of refined MPPI behavior actions used as policy positives.
             mppi_temp=1.0,  # Temperature for MPPI proposal reweighting.
             mppi_std=0.10,  # Base/floor std for MPPI resampling.
             mppi_std_min=0.03,  # Minimum diagonal std for MPPI resampling.
             mppi_std_max=0.30,  # Maximum diagonal std for MPPI resampling.
-            policy_num_pos=16,  # Deprecated/unused in cdp_v5 actor loss (kept for CLI compatibility).
             policy_num_neg=16,  # Number of policy self-generated negatives for policy drifting.
-            num_neg=16,  # Deprecated/unused in cdp_v5 actor loss (kept for CLI compatibility).
-            num_samples=16,  # Deprecated/unused in cdp_v5 policy drift (kept for CLI compatibility).
             pos_prob_temp=10,  # Temperature for exp(Q) sampling probabilities on mixed policy positives.
-            policy_neg_behavior_ratio=1.0,  # Deprecated/unused in cdp_v5 policy drift (kept for CLI compatibility).
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
         )
     )

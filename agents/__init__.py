@@ -5,6 +5,7 @@ from agents.cdp_v2 import CDPV2Agent
 from agents.cdp_v3 import CDPV3Agent
 from agents.cdp_v4 import CDPV4Agent
 from agents.cdp_v5 import CDPV5Agent
+from agents.cdp_v6 import CDPV6Agent
 from agents.codac import CODACAgent
 from agents.fbrac import FBRACAgent
 from agents.fql import FQLAgent
@@ -30,6 +31,8 @@ agents = dict(
     cdp_v4=CDPV4Agent,
     cdp_v5=CDPV5Agent,
     cdpv5=CDPV5Agent,
+    cdp_v6=CDPV6Agent,
+    cdpv6=CDPV6Agent,
     codac=CODACAgent,
     fbrac=FBRACAgent,
     fql=FQLAgent,
