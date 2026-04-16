@@ -27,6 +27,34 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         # Keep Value Flows style action extraction for the next action.
         next_actions = self.sample_actions(batch['next_observations'], actor_rng)
 
+         # BCFM  regularization loss
+        noises = jax.random.normal(noise_rng, (batch_size, 1))
+        times = jax.random.uniform(time_rng, (batch_size, 1))
+        next_returns1 = self.compute_flow_returns(
+            noises, batch['next_observations'], next_actions,
+            flow_network_name='target_critic_flow1')
+        next_returns2 = self.compute_flow_returns(
+            noises, batch['next_observations'], next_actions,
+            flow_network_name='target_critic_flow2')
+        if self.config['ret_agg'] == 'min':
+            next_returns = jnp.minimum(next_returns1, next_returns2)
+        else:
+            next_returns = (next_returns1 + next_returns2) / 2
+
+        # The following returns will be bounded automatically
+        returns = (jnp.expand_dims(batch['rewards'], axis=-1) +
+                   self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_returns)
+        noisy_returns = times * returns + (1 - times) * noises
+        target_vector_field = returns - noises
+
+        vector_field1 = self.network.select('critic_flow1')(
+            noisy_returns, times, batch['observations'], batch['actions'], params=grad_params)
+        vector_field2 = self.network.select('critic_flow2')(
+            noisy_returns, times, batch['observations'], batch['actions'], params=grad_params)
+        bcfm_loss = ((vector_field1 - target_vector_field) ** 2 +
+                     (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
+
+
         times = jax.random.uniform(time_rng, (batch_size, 1))
         next_noises = jax.random.normal(noise_rng, (batch_size, 1))
         noisy_next_returns1, ret_jac_eps_prods1 = self.compute_flow_returns(
@@ -93,7 +121,7 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         )
         target_vector_field = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field + r_vector_field
         implicit_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
-        critic_loss = (implicit_loss).mean()
+        critic_loss = (bcfm_loss + implicit_loss).mean()
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
         q1 = (q_noises + self.network.select('critic_flow1')(
