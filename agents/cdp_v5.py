@@ -219,19 +219,28 @@ class CDPV5Agent(flax.struct.PyTreeNode):
         q_dtype = behavior_candidate_actions.dtype
         weight_entropy = jnp.asarray(0.0, dtype=q_dtype)
         std_mean = jnp.asarray(0.0, dtype=q_dtype)
+        num_actions = behavior_candidate_actions.shape[1]
+        action_dim = behavior_candidate_actions.shape[-1]
+        num_elites = min(max(int(self.config['mppi_num_elites']), 1), num_actions)
 
         if self.config['mppi_enable']:
             for _ in range(int(self.config['mppi_iters'])):
                 rng, sample_rng = jax.random.split(rng)
                 candidate_q = self._score_action_candidates(observations, refined_actions, grad_params)
-                shifted_q = candidate_q - jnp.max(candidate_q, axis=1, keepdims=True)
+                elite_q, elite_idx = jax.lax.top_k(candidate_q, num_elites)
+                elite_idx_expanded = jnp.repeat(jnp.expand_dims(elite_idx, axis=-1), action_dim, axis=-1)
+                elite_actions = jnp.take_along_axis(refined_actions, elite_idx_expanded, axis=1)
+                elite_actions = jax.lax.stop_gradient(elite_actions)
+                elite_q = jax.lax.stop_gradient(elite_q)
+
+                shifted_q = elite_q - jnp.max(elite_q, axis=1, keepdims=True)
                 weights = jax.nn.softmax(shifted_q / self.config['mppi_temp'], axis=1)
                 weights = jax.lax.stop_gradient(weights)
 
-                mean = jnp.sum(weights[..., None] * refined_actions, axis=1, keepdims=True)
+                mean = jnp.sum(weights[..., None] * elite_actions, axis=1, keepdims=True)
                 mean = jax.lax.stop_gradient(mean)
 
-                centered_actions = refined_actions - mean
+                centered_actions = elite_actions - mean
                 var = jnp.sum(weights[..., None] * jnp.square(centered_actions), axis=1, keepdims=True)
                 std = jnp.sqrt(jnp.maximum(var, 1e-8))
                 std = jnp.clip(
@@ -657,6 +666,7 @@ def get_config():
             mppi_enable=True,  # Whether to refine behavior proposals before selecting policy positives.
             mppi_iters=2,  # Number of MPPI refinement iterations on the behavior proposal pool.
             mppi_num_samples=16,  # Number of MPPI refinement samples / behavior proposal candidates.
+            mppi_num_elites=8,  # Number of top-Q MPPI elites used to fit the refinement distribution.
             mppi_num_pos=8,  # Number of refined MPPI behavior actions used as policy positives.
             mppi_temp=1.0,  # Temperature for MPPI proposal reweighting.
             mppi_std=0.10,  # Base/floor std for MPPI resampling.
