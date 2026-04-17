@@ -99,10 +99,10 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         weights = jax.lax.stop_gradient(weights)
 
         next_vector_field1 = self.network.select('target_critic_flow1')(
-            mixed_next_returns, times, batch['next_observations'], next_actions
+            noisy_next_returns1, times, batch['next_observations'], next_actions
         )
         next_vector_field2 = self.network.select('target_critic_flow2')(
-            mixed_next_returns, times, batch['next_observations'], next_actions
+            noisy_next_returns2, times, batch['next_observations'], next_actions
         )
         if self.config['ret_agg'] == 'min':
             mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
@@ -121,9 +121,9 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         vector_field2 = self.network.select('critic_flow2')(
             noisy_returns2, times, batch['observations'], batch['actions'], params=grad_params
         )
-        target_vector_field1 = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_vector_field1 + r_vector_field
-        target_vector_field2 = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_vector_field2 + r_vector_field
-        implicit_loss = ((vector_field1 - target_vector_field1) ** 2 + (vector_field2 - target_vector_field2) ** 2).mean(axis=-1)
+        target_vector_field = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field + r_vector_field
+        # target_vector_field2 = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_vector_field2 + r_vector_field
+        implicit_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
         critic_loss = (implicit_loss).mean()
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
