@@ -363,7 +363,8 @@ class CDPV5Agent(flax.struct.PyTreeNode):
         else:
             dataset_pos_actions = jnp.zeros((batch_size, 0, action_dim), dtype=batch['actions'].dtype)
 
-        pos_actions = jnp.concatenate([pos_behavior_actions, dataset_pos_actions], axis=1)
+        # pos_actions = jnp.concatenate([pos_behavior_actions, dataset_pos_actions], axis=1)
+        pos_actions = pos_behavior_actions
         neg_actions = jnp.concatenate([raw_policy_actions, neg_behavior_actions], axis=1)
 
         # Build per-positive weights from state-wise scaled exp(Q) on the mixed positive pool.
@@ -652,7 +653,7 @@ def get_config():
             behavior_pool_size=16,  # Deprecated/unused in cdp_v5 MPPI positives (kept for CLI compatibility).
             behavior_topk_pos=4,  # Deprecated/unused in cdp_v5 MPPI positives (kept for CLI compatibility).
             behavior_bottomk_neg=4,  # Number of low-Q behavior candidates used as policy negatives.
-            dataset_num_pos=4,  # Number of dataset perturbation positives for policy drift.
+            dataset_num_pos=2,  # Number of dataset perturbation positives for policy drift.
             dataset_perturb_std=0.05,  # Std of Gaussian perturbation around dataset actions.
             mppi_enable=True,  # Whether to refine behavior proposals before selecting policy positives.
             mppi_iters=2,  # Number of MPPI refinement iterations on the behavior proposal pool.
