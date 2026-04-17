@@ -109,17 +109,17 @@ class ImplicitFlowsV3Agent(flax.struct.PyTreeNode):
         else:
             mixed_next_vector_field = (next_vector_field1 + next_vector_field2) / 2
 
-        noisy_returns1 = (
-            rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * noisy_next_returns1
+        noisy_returns = (
+            rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_returns
         )
-        noisy_returns2 = (
-            rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * noisy_next_returns2
-        )
+        # noisy_returns2 = (
+        #     rt + self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * noisy_next_returns2
+        # )
         vector_field1 = self.network.select('critic_flow1')(
-            noisy_returns1, times, batch['observations'], batch['actions'], params=grad_params
+            noisy_returns, times, batch['observations'], batch['actions'], params=grad_params
         )
         vector_field2 = self.network.select('critic_flow2')(
-            noisy_returns2, times, batch['observations'], batch['actions'], params=grad_params
+            noisy_returns, times, batch['observations'], batch['actions'], params=grad_params
         )
         target_vector_field = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field + r_vector_field
         # target_vector_field2 = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * next_vector_field2 + r_vector_field

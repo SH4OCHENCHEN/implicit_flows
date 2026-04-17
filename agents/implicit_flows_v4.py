@@ -25,7 +25,7 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
         rng, actor_rng, noise_rng, time_rng, q_rng, ret_rng, bcfm_noise_rng, bcfm_time_rng = jax.random.split(rng, 8)
 
         # Keep Value Flows style action extraction for the next action.
-        next_actions = self.sample_actions(batch['next_observations'], actor_rng)
+        next_actions = self.sample_actions(batch['next_observations'], actor_rng, policy_extraction='rpg')
 
         times = jax.random.uniform(time_rng, (batch_size, 1))
         next_noises = jax.random.normal(noise_rng, (batch_size, 1))
@@ -46,7 +46,6 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
             return_jac_eps_prod=True,
         )
 
-        # Aggregate next returns with only mean/min (remove alpha-weighted mixing).
         if self.config['ret_agg'] == 'min':
             mixed_next_returns = jnp.minimum(noisy_next_returns1, noisy_next_returns2)
         else:
@@ -58,10 +57,10 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
 
         next_vector_field1 = self.network.select('target_critic_flow1')(
-            mixed_next_returns, times, batch['next_observations'], next_actions
+            noisy_next_returns1, times, batch['next_observations'], next_actions
         )
         next_vector_field2 = self.network.select('target_critic_flow2')(
-            mixed_next_returns, times, batch['next_observations'], next_actions
+            noisy_next_returns2, times, batch['next_observations'], next_actions
         )
         if self.config['ret_agg'] == 'min':
             mixed_next_vector_field = jnp.minimum(next_vector_field1, next_vector_field2)
@@ -354,31 +353,31 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
                 q_seed,
                 (*observations.shape[: -len(self.config['ob_dims'])], self.config['num_samples'], 1),
             )
-            q1 = self.compute_flow_returns(
-                q_noises,
-                n_observations,
-                flow_actions,
-                flow_network_name='critic_flow1',
-            ).squeeze(-1)
-            q2 = self.compute_flow_returns(
-                q_noises,
-                n_observations,
-                flow_actions,
-                flow_network_name='critic_flow2',
-            ).squeeze(-1)
+            # q1 = self.compute_flow_returns(
+            #     q_noises,
+            #     n_observations,
+            #     flow_actions,
+            #     flow_network_name='critic_flow1',
+            # ).squeeze(-1)
+            # q2 = self.compute_flow_returns(
+            #     q_noises,
+            #     n_observations,
+            #     flow_actions,
+            #     flow_network_name='critic_flow2',
+            # ).squeeze(-1)
 
-            # q1 = (
-            #     q_noises
-            #     + self.network.select('critic_flow1')(
-            #         q_noises, jnp.zeros_like(q_noises), n_observations, flow_actions
-            #     )
-            # ).squeeze(-1)
-            # q2 = (
-            #     q_noises
-            #     + self.network.select('critic_flow2')(
-            #         q_noises, jnp.zeros_like(q_noises), n_observations, flow_actions
-            #     )
-            # ).squeeze(-1)
+            q1 = (
+                q_noises
+                + self.network.select('critic_flow1')(
+                    q_noises, jnp.zeros_like(q_noises), n_observations, flow_actions
+                )
+            ).squeeze(-1)
+            q2 = (
+                q_noises
+                + self.network.select('critic_flow2')(
+                    q_noises, jnp.zeros_like(q_noises), n_observations, flow_actions
+                )
+            ).squeeze(-1)
             if self.config['clip_flow_returns']:
                 q1 = jnp.clip(
                     q1,
