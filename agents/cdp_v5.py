@@ -363,8 +363,8 @@ class CDPV5Agent(flax.struct.PyTreeNode):
         else:
             dataset_pos_actions = jnp.zeros((batch_size, 0, action_dim), dtype=batch['actions'].dtype)
 
-        # pos_actions = jnp.concatenate([pos_behavior_actions, dataset_pos_actions], axis=1)
-        pos_actions = pos_behavior_actions
+        pos_actions = jnp.concatenate([pos_behavior_actions, dataset_pos_actions], axis=1)
+        # pos_actions = pos_behavior_actions
         neg_actions = jnp.concatenate([raw_policy_actions, neg_behavior_actions], axis=1)
 
         # Build per-positive weights from state-wise scaled exp(Q) on the mixed positive pool.
