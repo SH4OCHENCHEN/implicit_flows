@@ -531,7 +531,7 @@ def get_config():
             next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.
             next_return_clip_slack=0.05,  # Relaxation margin for lower/upper clipping bounds.
             bcfm_lambda=1.0,  # Bootstrapped conditional flow matching loss coefficient.
-            alpha=10.0,
+            alpha=20.0,
             encoder=ml_collections.config_dict.placeholder(str),
         )
     )
