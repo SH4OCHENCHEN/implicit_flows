@@ -25,7 +25,7 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
         rng, actor_rng, noise_rng, time_rng, q_rng, ret_rng, bcfm_noise_rng, bcfm_time_rng = jax.random.split(rng, 8)
 
         # Keep Value Flows style action extraction for the next action.
-        next_actions = self.sample_actions(batch['next_observations'], actor_rng, policy_extraction='rpg')
+        next_actions = self.sample_actions(batch['next_observations'], actor_rng)
 
         times = jax.random.uniform(time_rng, (batch_size, 1))
         next_noises = jax.random.normal(noise_rng, (batch_size, 1))
