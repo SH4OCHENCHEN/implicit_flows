@@ -561,14 +561,14 @@ def get_config():
             clip_flow_returns=True,
             num_samples=16,
             num_flow_steps=10,
-            normalize_q_loss=False,
+            normalize_q_loss=True,
             confidence_weight_temp=10,  # Temperature for the confidence weights.
             next_return_gaussian_mean=0.0,  # Gaussian mean for t=0 next-return clipping anchor.
             next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
             next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.
             next_return_clip_slack=0.05,  # Relaxation margin for lower/upper clipping bounds.
             bcfm_lambda=1.0,  # Bootstrapped conditional flow matching loss coefficient.
-            alpha=10.0,
+            alpha=1.0,
             encoder=ml_collections.config_dict.placeholder(str),
         )
     )
