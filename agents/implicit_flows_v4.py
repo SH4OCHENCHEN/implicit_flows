@@ -137,22 +137,22 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
         distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
-        q1 = self.compute_flow_returns(
-            q_noises,
-            batch['observations'],
-            actor_actions,
-            flow_network_name='critic_flow1',
-        ).squeeze(-1)
-        q2 = self.compute_flow_returns(
-            q_noises,
-            batch['observations'],
-            actor_actions,
-            flow_network_name='critic_flow2',
-        ).squeeze(-1)
-        # q1 = (q_noises + self.network.select('critic_flow1')(
-        #     q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
-        # q2 = (q_noises + self.network.select('critic_flow2')(
-        #     q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
+        # q1 = self.compute_flow_returns(
+        #     q_noises,
+        #     batch['observations'],
+        #     actor_actions,
+        #     flow_network_name='critic_flow1',
+        # ).squeeze(-1)
+        # q2 = self.compute_flow_returns(
+        #     q_noises,
+        #     batch['observations'],
+        #     actor_actions,
+        #     flow_network_name='critic_flow2',
+        # ).squeeze(-1)
+        q1 = (q_noises + self.network.select('critic_flow1')(
+            q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
+        q2 = (q_noises + self.network.select('critic_flow2')(
+            q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
         if self.config['clip_flow_returns']:
             q1 = jnp.clip(
                 q1,
@@ -327,7 +327,7 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
         observations,
         seed=None,
         temperature=1.0,
-        policy_extraction='rs',
+        policy_extraction='rpg',
     ):
         """Sample actions using rejection sampling or one-step policy extraction."""
         action_seed, q_seed = jax.random.split(seed)
@@ -524,14 +524,14 @@ def get_config():
             clip_flow_returns=True,
             num_samples=16,
             num_flow_steps=10,
-            normalize_q_loss=False,
+            normalize_q_loss=True,
             confidence_weight_temp=10,  # Temperature for the confidence weights.
             next_return_gaussian_mean=0.0,  # Gaussian mean for t=0 next-return clipping anchor.
             next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
             next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.
             next_return_clip_slack=0.05,  # Relaxation margin for lower/upper clipping bounds.
             bcfm_lambda=1.0,  # Bootstrapped conditional flow matching loss coefficient.
-            alpha=20.0,
+            alpha=0.3,
             encoder=ml_collections.config_dict.placeholder(str),
         )
     )
