@@ -12,7 +12,7 @@ SEEDS_STR="${SEEDS:-0}"
 CUBE_TASK_ID="${CUBE_TASK_ID:-task1}"
 
 # Sweep values (can be overridden by env var).
-ALPHAS_STR="${ALPHAS:-0.3 0.5 2 3}"
+ALPHAS_STR="${ALPHAS:-1.5 2.5 3}"
 
 IFS=' ' read -r -a SEED_LIST <<< "$SEEDS_STR"
 IFS=' ' read -r -a ALPHAS <<< "$ALPHAS_STR"

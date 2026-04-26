@@ -19,6 +19,116 @@ class ImplicitFlowsV4Agent(flax.struct.PyTreeNode):
     network: Any
     config: Any = nonpytree_field()
 
+    def _flatten_batch_axes(self, array, event_ndims):
+        """Flatten leading batch axes while keeping the trailing event dims."""
+        batch_shape = array.shape[:-event_ndims]
+        flat_array = array.reshape((-1, *array.shape[-event_ndims:]))
+        return flat_array, batch_shape
+
+    @jax.jit
+    def actor_flow_jvp_wrt_xt(self, observations, xt, times, xt_tangent, params=None):
+        """Compute J(xt) @ v for the actor flow field f(obs, xt, t)."""
+        return jax.jvp(
+            lambda x: self.network.select('actor_flow')(observations, x, times, params=params),
+            (xt,),
+            (xt_tangent,),
+        )
+
+    @partial(jax.jit, static_argnames=('flow_network_name',))
+    def critic_flow_jvp_wrt_xt(
+        self,
+        xt,
+        times,
+        observations,
+        actions,
+        xt_tangent,
+        flow_network_name='critic_flow1',
+        params=None,
+    ):
+        """Compute J(xt) @ v for the critic return-flow field f(xt, t, obs, act)."""
+        return jax.jvp(
+            lambda x: self.network.select(flow_network_name)(x, times, observations, actions, params=params),
+            (xt,),
+            (xt_tangent,),
+        )
+
+    @jax.jit
+    def actor_flow_jacobian_wrt_xt(self, observations, xt, times, params=None):
+        """Compute the exact Jacobian df(obs, xt, t) / dxt for the actor flow."""
+        flat_xt, batch_shape = self._flatten_batch_axes(xt, 1)
+        flat_times, _ = self._flatten_batch_axes(times, 1)
+        flat_observations, _ = self._flatten_batch_axes(observations, len(self.config['ob_dims']))
+
+        def single_jac(obs, x, t):
+            return jax.jacrev(
+                lambda x_single: self.network.select('actor_flow')(
+                    jnp.expand_dims(obs, axis=0),
+                    jnp.expand_dims(x_single, axis=0),
+                    jnp.expand_dims(t, axis=0),
+                    params=params,
+                )[0]
+            )(x)
+
+        flat_jacobian = jax.vmap(single_jac)(flat_observations, flat_xt, flat_times)
+        return flat_jacobian.reshape((*batch_shape, xt.shape[-1], xt.shape[-1]))
+
+    @partial(jax.jit, static_argnames=('flow_network_name',))
+    def critic_flow_jacobian_wrt_xt(
+        self,
+        xt,
+        times,
+        observations,
+        actions,
+        flow_network_name='critic_flow1',
+        params=None,
+    ):
+        """Compute the exact Jacobian df(xt, t, obs, act) / dxt for a critic flow."""
+        flat_xt, batch_shape = self._flatten_batch_axes(xt, 1)
+        flat_times, _ = self._flatten_batch_axes(times, 1)
+        flat_observations, _ = self._flatten_batch_axes(observations, len(self.config['ob_dims']))
+        flat_actions, _ = self._flatten_batch_axes(actions, 1)
+
+        def single_jac(x, t, obs, act):
+            return jax.jacrev(
+                lambda x_single: self.network.select(flow_network_name)(
+                    jnp.expand_dims(x_single, axis=0),
+                    jnp.expand_dims(t, axis=0),
+                    jnp.expand_dims(obs, axis=0),
+                    jnp.expand_dims(act, axis=0),
+                    params=params,
+                )[0]
+            )(x)
+
+        flat_jacobian = jax.vmap(single_jac)(flat_xt, flat_times, flat_observations, flat_actions)
+        return flat_jacobian.reshape((*batch_shape, xt.shape[-1], xt.shape[-1]))
+
+    @jax.jit
+    def actor_flow_divergence_wrt_xt(self, observations, xt, times, params=None):
+        """Compute tr(df / dxt) for the actor flow."""
+        jacobian = self.actor_flow_jacobian_wrt_xt(observations, xt, times, params=params)
+        return jnp.trace(jacobian, axis1=-2, axis2=-1)
+
+    @partial(jax.jit, static_argnames=('flow_network_name',))
+    def critic_flow_divergence_wrt_xt(
+        self,
+        xt,
+        times,
+        observations,
+        actions,
+        flow_network_name='critic_flow1',
+        params=None,
+    ):
+        """Compute tr(df / dxt) for a critic return flow."""
+        jacobian = self.critic_flow_jacobian_wrt_xt(
+            xt,
+            times,
+            observations,
+            actions,
+            flow_network_name=flow_network_name,
+            params=params,
+        )
+        return jnp.trace(jacobian, axis1=-2, axis2=-1)
+
     def critic_loss(self, batch, grad_params, rng):
         """Compute implicit critic loss (kept from implicit flows)."""
         batch_size = batch['actions'].shape[0]
