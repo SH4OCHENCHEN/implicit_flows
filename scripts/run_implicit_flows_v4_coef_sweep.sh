@@ -12,10 +12,12 @@ SEEDS_STR="${SEEDS:-0}"
 CUBE_TASK_ID="${CUBE_TASK_ID:-task1}"
 
 # Sweep values (can be overridden by env var).
-ALPHAS_STR="${ALPHAS:-1.5 2.5 3}"
+ALPHAS_STR="${ALPHAS:-0.1}"
+RANKCOEFS_STR="${RANKCOEFS:-0.0 0.01 0.05 0.1}"
 
 IFS=' ' read -r -a SEED_LIST <<< "$SEEDS_STR"
 IFS=' ' read -r -a ALPHAS <<< "$ALPHAS_STR"
+IFS=' ' read -r -a RANKCOEFS <<< "$RANKCOEFS_STR"
 
 mkdir -p "$SAVE_ROOT"
 
@@ -44,12 +46,15 @@ run_exp() {
 
 for seed in "${SEED_LIST[@]}"; do
   for alpha in "${ALPHAS[@]}"; do
-    run_exp "implicit_flows_v4-cube-triple-${CUBE_TASK_ID}-seed${seed}-alpha${alpha}" \
-      --seed="${seed}" \
-      --env_name="cube-triple-play-singletask-${CUBE_TASK_ID}-v0" \
-      --agent=agents/implicit_flows_v4.py \
-      --agent.discount=0.995 \
-      --agent.alpha="${alpha}" || true
+    for rankcoef in "${RANKCOEFS[@]}"; do
+      run_exp "implicit_flows_v4-cube-triple-${CUBE_TASK_ID}-seed${seed}-alpha${alpha}-rankcoef${rankcoef}" \
+        --seed="${seed}" \
+        --env_name="cube-triple-play-singletask-${CUBE_TASK_ID}-v0" \
+        --agent=agents/implicit_flows_v4.py \
+        --agent.discount=0.995 \
+        --agent.alpha="${alpha}" \
+        --agent.rankcoef="${rankcoef}" || true
+    done
   done
 done
 
