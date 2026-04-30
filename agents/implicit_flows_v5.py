@@ -30,7 +30,7 @@ class ImplicitFlowsV5Agent(flax.struct.PyTreeNode):
         # Next-return distribution estimation for confidence weighting.
         times = jax.random.uniform(time_rng, (batch_size, 1))
         next_noises = jax.random.normal(noise_rng, (batch_size, 1))
-        noisy_next_returns1, ret_jac_eps_prods1 = self.compute_flow_returns(
+        noisy_next_returns1, _ = self.compute_flow_returns(
             next_noises,
             batch['next_observations'],
             next_actions,
@@ -38,7 +38,7 @@ class ImplicitFlowsV5Agent(flax.struct.PyTreeNode):
             flow_network_name='target_critic_flow1',
             return_jac_eps_prod=True,
         )
-        noisy_next_returns2, ret_jac_eps_prods2 = self.compute_flow_returns(
+        noisy_next_returns2, _ = self.compute_flow_returns(
             next_noises,
             batch['next_observations'],
             next_actions,
@@ -46,11 +46,6 @@ class ImplicitFlowsV5Agent(flax.struct.PyTreeNode):
             flow_network_name='target_critic_flow2',
             return_jac_eps_prod=True,
         )
-        next_ret_stds1 = jnp.sqrt(ret_jac_eps_prods1.squeeze(-1) ** 2)
-        next_ret_stds2 = jnp.sqrt(ret_jac_eps_prods2.squeeze(-1) ** 2)
-
-        ret_stds1 = next_ret_stds1
-        ret_stds2 = next_ret_stds2
 
         # Aggregate next returns with only mean/min (remove alpha-weighted mixing).
         if self.config['ret_agg'] == 'min':
@@ -62,14 +57,6 @@ class ImplicitFlowsV5Agent(flax.struct.PyTreeNode):
         r_noises = jnp.sqrt((1 - (self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1)) ** 2)) * eta
         rt = times * jnp.expand_dims(batch['rewards'], axis=-1) + (1 - times) * r_noises
         r_vector_field = jnp.expand_dims(batch['rewards'], axis=-1) - r_noises
-
-        # Confidence weights from next-return stds: larger std -> smaller weight.
-        if self.config['q_agg'] == 'min':
-            ret_stds = jnp.minimum(ret_stds1, ret_stds2)
-        else:
-            ret_stds = (ret_stds1 + ret_stds2) / 2
-        weights = 0.5 + jax.nn.sigmoid(-self.config['confidence_weight_temp'] * ret_stds)
-        weights = jax.lax.stop_gradient(weights)
 
         next_vector_field1 = self.network.select('target_critic_flow1')(
             noisy_next_returns1, times, batch['next_observations'], next_actions
@@ -93,6 +80,12 @@ class ImplicitFlowsV5Agent(flax.struct.PyTreeNode):
         )
         target_vector_field = self.config['discount'] * jnp.expand_dims(batch['masks'], axis=-1) * mixed_next_vector_field + r_vector_field
         implicit_loss = ((vector_field1 - target_vector_field) ** 2 + (vector_field2 - target_vector_field) ** 2).mean(axis=-1)
+        clipped_next_noise_excess = jax.nn.softplus(next_noises - self.config['next_noise_threshold'])
+        noise_weights = jnp.exp(
+            -(clipped_next_noise_excess ** 2) / (2 * self.config['next_noise_welsch_temp'] ** 2)
+        )
+        noise_weights = jax.lax.stop_gradient(noise_weights.squeeze(-1))
+        implicit_loss = implicit_loss * noise_weights
         implicit_loss = implicit_loss.mean()
 
         # RANK LOSS: enforce correct ranking of returns with two noise samples and a hinge loss.
@@ -204,11 +197,9 @@ class ImplicitFlowsV5Agent(flax.struct.PyTreeNode):
             'q_mean': q.mean(),
             'q_max': q.max(),
             'q_min': q.min(),
-            'weights_mean': weights.mean(),
-            'weights_min': weights.min(),
-            'weights_max': weights.max(),
-            'next_ret_std_mean': ret_stds.mean(),
-            'next_ret_std_max': ret_stds.max(),
+            'noise_weights_mean': noise_weights.mean(),
+            'noise_weights_min': noise_weights.min(),
+            'noise_weights_max': noise_weights.max(),
             'next_return1_mean': noisy_next_returns1.mean(),
             'next_return2_mean': noisy_next_returns2.mean(),
             'mixed_next_return_mean': mixed_next_returns.mean(),
@@ -238,18 +229,8 @@ class ImplicitFlowsV5Agent(flax.struct.PyTreeNode):
         distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
         q_noises = jax.random.normal(q_rng, (batch_size, 1))
-        # q1 = self.compute_flow_returns(
-        #     q_noises,
-        #     batch['observations'],
-        #     actor_actions,
-        #     flow_network_name='critic_flow1',
-        # ).squeeze(-1)
-        # q2 = self.compute_flow_returns(
-        #     q_noises,
-        #     batch['observations'],
-        #     actor_actions,
-        #     flow_network_name='critic_flow2',
-        # ).squeeze(-1)
+        q_noises = jnp.minimum(q_noises, self.config['next_noise_threshold'])
+
         q1 = (q_noises + self.network.select('critic_flow1')(
             q_noises, jnp.zeros_like(q_noises), batch['observations'], actor_actions)).squeeze(-1)
         q2 = (q_noises + self.network.select('critic_flow2')(
@@ -429,7 +410,7 @@ class ImplicitFlowsV5Agent(flax.struct.PyTreeNode):
         observations,
         seed=None,
         temperature=1.0,
-        policy_extraction='rs',
+        policy_extraction='rpg',
     ):
         """Sample actions using rejection sampling or one-step policy extraction."""
         action_seed, q_seed = jax.random.split(seed)
@@ -615,12 +596,9 @@ def get_config():
             num_flow_steps=10,
             normalize_q_loss=True,
             confidence_weight_temp=10,  # Temperature for the confidence weights.
-            next_return_gaussian_mean=0.0,  # Gaussian mean for t=0 next-return clipping anchor.
-            next_return_gaussian_std=1.0,  # Gaussian std for t=0 next-return clipping anchor.
-            next_return_clip_sigma=2.0,  # Sigma multiplier for Gaussian clipping anchor.
-            next_return_clip_slack=0.05,  # Relaxation margin for lower/upper clipping bounds.
-            bcfm_lambda=1.0,  # Bootstrapped conditional flow matching loss coefficient.
-            rankcoef=0.1,
+            next_noise_threshold=3.0,  # Upper threshold for Gaussian next-noise weighting/truncation.
+            next_noise_welsch_temp=0.5,  # Welsch temperature for the next-noise implicit loss weight.
+            rankcoef=0.05,
             alpha=1.0,
             encoder=ml_collections.config_dict.placeholder(str),
         )
